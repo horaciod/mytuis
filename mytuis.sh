@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-# awapps.sh — Application Manager with TUI
+# mytuis.sh — Application Manager with TUI
 # ----------------------------------------------------------------------------
 # A bash script that uses 'gum' (https://github.com/charmbracelet/gum) to
 # provide a friendly terminal interface for managing a personal catalogue
@@ -9,7 +9,7 @@
 #
 # Features
 #   * CRUD operations for applications: Create, Read, Update and Delete.
-#   * Persistent storage in YAML format at ~/.awapps.yaml.
+#   * Persistent storage in YAML format at ~/.mytuis.yaml.
 #   * For every app the following metadata is kept:
 #       - name            (human readable identifier, must be unique)
 #       - description     (short free-form text)
@@ -37,7 +37,7 @@ set -euo pipefail
 # APPS_FILE: absolute path to the YAML file that stores all applications.
 # It is placed in the user's home directory and uses the .yaml extension so
 # the file is recognized by standard YAML tooling.
-readonly APPS_FILE="${HOME}/.awapps.yaml"
+readonly APPS_FILE="${HOME}/.mytuis.yaml"
 
 # DELIM: internal field separator used to pass data between bash and awk,
 # and between the listing and the parsing helpers. The Unit Separator
@@ -78,9 +78,9 @@ init_apps_file() {
     if [[ ! -f "$APPS_FILE" ]]; then
         # Write a minimal valid YAML file with an empty apps list.
         cat > "$APPS_FILE" <<'EOF'
-# awapps — Application Manager
+# mytuis — Application Manager
 # This file stores your registered applications in YAML format.
-# It is automatically generated and managed by the awapps.sh script.
+# It is automatically generated and managed by the mytuis.sh script.
 apps: []
 EOF
     fi
@@ -273,8 +273,8 @@ write_apps() {
 
     # Now produce the YAML output.
     {
-        echo "# awapps — Application Manager"
-        echo "# Auto-generated file. Use awapps.sh to manage your apps."
+        echo "# mytuis — Application Manager"
+        echo "# Auto-generated file. Use mytuis.sh to manage your apps."
 
         if [[ ${#names[@]} -eq 0 ]]; then
             # No applications registered yet: keep the list empty.
@@ -317,7 +317,7 @@ show_header() {
         --margin "0 0 1 0" \
         --foreground 255 \
         --align center \
-        "$(gum style --foreground 212 --bold 'awapps')  ::  $(gum style --foreground 39 'Application Manager')"
+        "$(gum style --foreground 212 --bold 'mytuis')  ::  $(gum style --foreground 39 'Application Manager')"
 }
 
 # format_listing

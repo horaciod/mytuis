@@ -1,4 +1,4 @@
-# awapps — Application Manager
+# mytuis — Application Manager
 
 A small, attractive terminal UI for managing a personal catalogue of
 applications. Built with [gum](https://github.com/charmbracelet/gum) and
@@ -6,7 +6,7 @@ plain bash, with persistent storage in a human-readable YAML file.
 
 ```
 ╔═════════════════════════════════════╗
-║  awapps  ::  Application Manager    ║
+║  mytuis  ::  Application Manager    ║
 ╚═════════════════════════════════════╝
 
 What do you want to do?
@@ -28,7 +28,7 @@ What do you want to do?
   plain command names looked up in `$PATH` (`firefox`).
 - **Persistent metadata** — every entry stores its name, description,
   absolute path, creation date and last-used date.
-- **YAML storage** — the catalogue lives in `~/.awapps.yaml` and can be
+- **YAML storage** — the catalogue lives in `~/.mytuis.yaml` and can be
   inspected, edited or backed up with any text editor.
 - **Filterable list** — quickly find an app by typing into the filter
   prompt; the description is visible in every row of the list.
@@ -47,21 +47,21 @@ What do you want to do?
 ## Installation
 
 1. Install `gum` using your package manager.
-2. Copy `awapps.sh` somewhere on your `$PATH`, for example:
+2. Copy `mytuis.sh` somewhere on your `$PATH`, for example:
    ```bash
-   install -m 755 awapps.sh /usr/local/bin/awapps
+   install -m 755 mytuis.sh /usr/local/bin/mytuis
    ```
    Or simply run it from the cloned repository:
    ```bash
-   ./awapps.sh
+   ./mytuis.sh
    ```
 
-The script creates `~/.awapps.yaml` automatically on the first run.
+The script creates `~/.mytuis.yaml` automatically on the first run.
 
 ## Usage
 
 ```bash
-awapps
+mytuis
 ```
 
 From the main menu you can:
@@ -101,11 +101,11 @@ window.
 
 ## File format
 
-The catalogue is stored at `~/.awapps.yaml`:
+The catalogue is stored at `~/.mytuis.yaml`:
 
 ```yaml
-# awapps — Application Manager
-# Auto-generated file. Use awapps.sh to manage your apps.
+# mytuis — Application Manager
+# Auto-generated file. Use mytuis.sh to manage your apps.
 apps:
   - name: 'nvim'
     description: 'Hyperextensible Vim-based text editor'
@@ -121,9 +121,9 @@ apps:
 If the catalogue is empty the file contains:
 
 ```yaml
-# awapps — Application Manager
+# mytuis — Application Manager
 # This file stores your registered applications in YAML format.
-# It is automatically generated and managed by the awapps.sh script.
+# It is automatically generated and managed by the mytuis.sh script.
 apps: []
 ```
 
@@ -137,7 +137,7 @@ as `'it''s a test'`.
 | Function               | Purpose                                                              |
 |------------------------|----------------------------------------------------------------------|
 | `check_dependencies`   | Verifies that `gum` is available.                                    |
-| `init_apps_file`       | Creates `~/.awapps.yaml` with `apps: []` on the first run.           |
+| `init_apps_file`       | Creates `~/.mytuis.yaml` with `apps: []` on the first run.           |
 | `get_current_date`     | Returns the current date as `YYYY-MM-DD HH:MM:SS`.                   |
 | `resolve_path`         | Resolves tilde / absolute / relative / `$PATH` inputs.               |
 | `yaml_escape_sq`       | Escapes single quotes for use in single-quoted YAML scalars.         |
