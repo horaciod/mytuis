@@ -4,34 +4,45 @@ A small, attractive terminal UI for managing a personal catalogue of
 applications. Built with [gum](https://github.com/charmbracelet/gum) and
 plain bash, with persistent storage in a human-readable YAML file.
 
+The script exposes two surfaces:
+
+- An **interactive TUI** (just run `mytuis` with no arguments). The
+  first thing you see is the catalogue list with two meta entries
+  (`[+] Add new application` and `[x] Exit`); pick an app to open a
+  per-app sub-menu with Run / Edit / Delete / Back.
+- A small **command-line interface** for scripting and quick operations:
+  `mytuis list`, `mytuis add [name desc path]`, `mytuis remove <name>`
+  and `mytuis help`.
+
 ```
 ╔═════════════════════════════════════╗
 ║  mytuis  ::  Application Manager    ║
 ╚═════════════════════════════════════╝
 
-What do you want to do?
-▶ Run an application
-  Add a new application
-  Edit an application
-  Delete an application
-  Exit
+Pick an app, add a new one, or exit (type to filter):
+▶ [+]
+  firefox — Web browser
+  bash    — Login shell
+  git     — Distributed VCS
+  [x]
 ```
 
 ## Features
 
-- **CRUD operations** — create, read, update and delete application
-  entries from a single menu.
-- **Quick launch** — pick an app from the filterable list and it is
-  launched immediately, replacing the manager process via `exec`.
+- **List-first TUI** — the catalogue is the entry point. From any app
+  row you can Run, Edit or Delete in one extra keystroke; meta entries
+  let you add or exit without leaving the screen.
+- **Filterable list** — type to narrow the matches across both apps
+  and meta entries.
+- **CLI** — `list`, `add` and `remove` work non-interactively so you can
+  script the catalogue or seed it from a dotfiles repo.
 - **Smart path handling** — accepts absolute paths (`/usr/bin/firefox`),
-  relative paths (`./scripts/myscript.sh`), tilde paths (`~/bin/foo`) or
-  plain command names looked up in `$PATH` (`firefox`).
+  relative paths (`./scripts/myscript.sh`), tilde paths (`~/bin/foo`)
+  and bare command names looked up in `$PATH` (`firefox`).
 - **Persistent metadata** — every entry stores its name, description,
   absolute path, creation date and last-used date.
 - **YAML storage** — the catalogue lives in `~/.mytuis.yaml` and can be
   inspected, edited or backed up with any text editor.
-- **Filterable list** — quickly find an app by typing into the filter
-  prompt; the description is visible in every row of the list.
 - **Friendly TUI** — clear menus, color-coded messages and clean
   borders, all powered by `gum`.
 
@@ -42,7 +53,7 @@ What do you want to do?
   `brew install gum` (macOS), `pacman -S gum` (Arch),
   `apt install gum` (some Debian-based distros) or see the
   [official installation guide](https://github.com/charmbracelet/gum#installation).
-- Standard Unix utilities: `awk`, `sed`, `grep`, `date`, `tput`.
+- Standard Unix utilities: `awk`, `sed`, `grep`, `date`, `column`.
 
 ## Installation
 
@@ -60,19 +71,35 @@ The script creates `~/.mytuis.yaml` automatically on the first run.
 
 ## Usage
 
-```bash
-mytuis
+```
+mytuis                       Open the interactive TUI.
+mytuis list                  List all registered applications.
+mytuis add [name desc path]  Add an application. Interactive if no
+                             arguments are provided.
+mytuis remove <name>         Remove an application by name.
+mytuis help                  Show this help message.
 ```
 
-From the main menu you can:
+### Interactive TUI
 
-| Option                  | What it does                                                |
-|-------------------------|-------------------------------------------------------------|
-| Run an application      | Filterable, scrollable list — picking one launches it.      |
-| Add a new application   | Prompts for name, description and path.                     |
-| Edit an application     | Lets you change any field of an existing entry.             |
-| Delete an application   | Removes an entry after confirmation.                        |
-| Exit                    | Quit the manager.                                           |
+When you run `mytuis` with no arguments the script shows the catalogue
+list right away. The list contains:
+
+- `[+] Add new application` — opens the three-step form (name,
+  description, path).
+- One row per registered app, formatted as `name — description`.
+- `[x] Exit` — quits the manager.
+
+Type to filter; use ↑/↓ to move; Enter to select.
+
+When you pick an app, a sub-menu opens with:
+
+| Option                  | What it does                                  |
+|-------------------------|-----------------------------------------------|
+| Run this application    | Launches the app via `exec`.                  |
+| Edit this application   | Pre-fills the form with current values.       |
+| Delete this application | Asks for confirmation, then removes the entry.|
+| Back to list            | Returns to the catalogue list.                |
 
 ### Adding an application
 
@@ -91,13 +118,33 @@ You will be asked for three things:
 through the manager. The `created` date is set on add and is preserved
 across edits.
 
+### Examples
+
+```bash
+# Open the TUI
+mytuis
+
+# List apps in a nicely formatted table (TTY) or tab-aligned text (pipe)
+mytuis list
+mytuis list | grep firefox
+
+# Add an app non-interactively
+mytuis add nvim "Modal text editor" nvim
+mytuis add yt-dlp "Video downloader" /usr/local/bin/yt-dlp
+
+# Add an app interactively (equivalent to picking '[+]' in the TUI)
+mytuis add
+
+# Remove an app
+mytuis remove nvim
+```
+
 ### Running an application
 
 The list is filterable: just type a few characters of the name or
-description to narrow down the matches. Use ↑/↓ to move, Enter to
-select. The selected app is launched via `exec`, so the manager
-process is completely replaced by the application — no extra shell
-window.
+description to narrow down the matches. The selected app is launched
+via `exec`, so the manager process is completely replaced by the
+application — no extra shell window.
 
 ## File format
 
@@ -134,30 +181,41 @@ as `'it''s a test'`.
 
 ## Script structure
 
-| Function               | Purpose                                                              |
-|------------------------|----------------------------------------------------------------------|
-| `check_dependencies`   | Verifies that `gum` is available.                                    |
-| `init_apps_file`       | Creates `~/.mytuis.yaml` with `apps: []` on the first run.           |
-| `get_current_date`     | Returns the current date as `YYYY-MM-DD HH:MM:SS`.                   |
-| `resolve_path`         | Resolves tilde / absolute / relative / `$PATH` inputs.               |
-| `yaml_escape_sq`       | Escapes single quotes for use in single-quoted YAML scalars.         |
-| `truncate`             | Truncates a string to a maximum length with an ellipsis.             |
-| `read_apps`            | Parses the YAML file with `awk` and emits one record per app.        |
-| `write_apps`           | Rewrites the YAML file from a stream of records piped via stdin.     |
-| `show_header`          | Draws the styled header banner.                                      |
-| `format_listing`       | Builds the human-readable `name — description` list for the filter.  |
-| `extract_name_from_selection` | Extracts the app name from a `gum filter` selection.          |
-| `action_run`           | Run: pick an app, update `last_used` and `exec` it.                   |
-| `action_add`           | Create: prompt for name / description / path and persist.            |
-| `action_edit`          | Update: change the fields of an existing entry.                      |
-| `action_delete`        | Delete: confirm and remove an entry.                                 |
-| `main`                 | Top-level menu loop that dispatches to the action functions.         |
+| Function                        | Purpose                                                                |
+|---------------------------------|------------------------------------------------------------------------|
+| `check_dependencies`            | Verifies that `gum` is available.                                      |
+| `init_apps_file`                | Creates `~/.mytuis.yaml` with `apps: []` on the first run.             |
+| `get_current_date`              | Returns the current date as `YYYY-MM-DD HH:MM:SS`.                     |
+| `resolve_path`                  | Resolves tilde / absolute / relative / `$PATH` inputs.                 |
+| `truncate`                      | Truncates a string to a maximum length with an ellipsis.               |
+| `read_apps`                     | Parses the YAML file with `awk` and emits one record per app.          |
+| `write_apps`                    | Rewrites the YAML file from a stream of records piped via stdin.       |
+| `show_header`                   | Draws the styled header banner.                                        |
+| `format_apps_listing`           | Builds `name — description` rows for the filter / list.                |
+| `format_main_listing`           | Wraps the apps listing with the `[+]` and `[x]` meta entries.          |
+| `extract_name_from_selection`   | Extracts the app name from a `gum filter` selection.                   |
+| `has_apps` / `app_exists`       | Convenience predicates over the catalogue.                             |
+| `action_run_app`                | Updates `last_used`, shows a launch card and `exec`s the app.           |
+| `action_add_new`                | Drives the three-step form to add a new application.                   |
+| `action_edit_app`               | Edits a single application by name.                                    |
+| `action_delete_app`             | Confirms and deletes a single application by name.                     |
+| `action_submenu`                | Shows the per-app Run / Edit / Delete / Back menu.                     |
+| `cmd_usage`                     | Prints the CLI usage information.                                      |
+| `cmd_list`                      | Prints the catalogue as a table (TTY) or column-aligned text (pipe).   |
+| `cmd_add`                       | Adds an app, non-interactively if three arguments are provided.        |
+| `cmd_remove`                    | Removes an app by name, with confirmation when interactive.            |
+| `main_tui`                      | The TUI loop: shows the main list, dispatches selections.              |
+| `main`                          | Top-level entry point that dispatches to TUI or CLI sub-commands.      |
 
 ## Tips
 
 - The list of apps is filterable: type to narrow down the matches.
 - The selected app is launched via `exec`, so the manager process is
   completely replaced by the application.
+- Pipe `mytuis list` into `grep`, `fzf`, `less`, etc. — when stdout is
+  not a TTY the command falls back to a column-aligned text format.
+- Use `mytuis add name desc path` from a shell script or a dotfiles
+  installer to seed the catalogue automatically.
 - The YAML file is plain text and safe to back up, sync with a
   dotfiles repository, or version-control.
 - All file operations are performed atomically by rewriting the YAML

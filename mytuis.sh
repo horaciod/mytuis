@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-# mytuis.sh — Application Manager with TUI
+# mytuis.sh — Application Manager with TUI and CLI
 # ----------------------------------------------------------------------------
 # A bash script that uses 'gum' (https://github.com/charmbracelet/gum) to
 # provide a friendly terminal interface for managing a personal catalogue
 # of applications installed on the system.
 #
-# Features
-#   * CRUD operations for applications: Create, Read, Update and Delete.
-#   * Persistent storage in YAML format at ~/.mytuis.yaml.
-#   * For every app the following metadata is kept:
-#       - name            (human readable identifier, must be unique)
-#       - description     (short free-form text)
-#       - path            (absolute path to the executable)
-#       - created         (date the entry was added)
-#       - last_used       (date the app was last launched from the script)
-#   * Quick launch: picking an app from the menu launches it via 'exec',
-#     so the manager process is replaced by the application itself.
+# It exposes two surfaces:
+#
+#   * An interactive TUI (just run 'mytuis' with no arguments) that
+#     starts in the catalogue list and lets the user run, edit, delete
+#     or add applications.
+#   * A small command-line interface for scripting and quick operations:
+#         mytuis list                  list all registered apps
+#         mytuis add [n d p]           add an app (interactive if no args)
+#         mytuis remove <name>         remove an app by name
+#         mytuis help                  show usage
+#
+# Storage
+#   * All data lives in a single YAML file at ~/.mytuis.yaml. Each entry
+#     carries: name, description, path, created and last_used.
 #
 # Dependencies
 #   * gum         — https://github.com/charmbracelet/gum
-#   * awk, grep, sed, date (standard on virtually any Unix system)
+#   * awk, sed, grep, date (standard on virtually any Unix system)
 #
 # Author      : generated for the user
 # License     : MIT
@@ -45,10 +48,17 @@ readonly APPS_FILE="${HOME}/.mytuis.yaml"
 # extremely unlikely to appear in user-entered data.
 readonly DELIM=$'\x1f'
 
-# DISPLAY_SEP: separator used when building the human-readable listing that
-# is fed to 'gum filter'. The em-dash with surrounding spaces is used so
-# the visual list looks like "name — description".
+# DISPLAY_SEP: separator used when building the human-readable listing
+# that is fed to 'gum filter'. The em-dash with surrounding spaces is
+# used so the visual list reads as "name — description".
 readonly DISPLAY_SEP=' — '
+
+# META_ADD / META_EXIT: literal strings shown in the main listing as
+# pseudo-entries. They are detected by exact match before the script
+# tries to extract an application name, so the brackets guarantee no
+# collision with real app names.
+readonly META_ADD='[+] Add new application'
+readonly META_EXIT='[x] Exit'
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -140,23 +150,6 @@ resolve_path() {
     if [[ -n "$found" && -e "$found" ]]; then
         echo "$found"
     fi
-}
-
-# yaml_escape_sq
-# ----------------------------------------------------------------------------
-# Escapes a string for use inside a single-quoted YAML scalar. In YAML
-# single-quoted strings, the only escape sequence is '' (two consecutive
-# single quotes), which represents a literal single quote character.
-#
-# Arguments:
-#   $1  -  the string to escape
-# Output:
-#   The escaped string on stdout.
-yaml_escape_sq() {
-    local str="$1"
-    # Replace each single quote with two single quotes ('' -> ').
-    str="${str//\'/\'\'}"
-    echo "$str"
 }
 
 # truncate
@@ -283,6 +276,8 @@ write_apps() {
             echo "apps:"
             local i esc_name esc_desc esc_path esc_created esc_last
             for i in "${!names[@]}"; do
+                # In single-quoted YAML strings, a literal single quote is
+                # represented by doubling it ('' -> ').
                 esc_name="${names[$i]//\'/\'\'}"
                 esc_desc="${descs[$i]//\'/\'\'}"
                 esc_path="${paths[$i]//\'/\'\'}"
@@ -320,21 +315,37 @@ show_header() {
         "$(gum style --foreground 212 --bold 'mytuis')  ::  $(gum style --foreground 39 'Application Manager')"
 }
 
-# format_listing
+# format_apps_listing
 # ----------------------------------------------------------------------------
-# Builds the list of strings used by 'gum filter' to present the apps.
-# Each entry is formatted as: "name — description" so the user can
-# identify every app at a glance. The description is truncated to keep
-# the listing readable.
+# Builds the plain listing of apps (one per line) used by the TUI filter
+# and by the CLI list command. Each entry is formatted as:
+#     "name — description"
+# so the user can identify every app at a glance.
 #
 # Output: one line per registered app on stdout
-format_listing() {
+format_apps_listing() {
     while IFS="$DELIM" read -r name desc _path _created _last_used; do
         [[ -z "$name" ]] && continue
         local short_desc
         short_desc="$(truncate "$desc" 60)"
         echo "${name}${DISPLAY_SEP}${short_desc}"
     done < <(read_apps)
+}
+
+# format_main_listing
+# ----------------------------------------------------------------------------
+# Builds the full listing shown in the TUI main view. It consists of the
+# meta entries ([+] Add new application and [x] Exit) framing the list
+# of registered apps. The user filters through them just like normal
+# entries, and the dispatcher in main_tui distinguishes meta entries
+# from real apps by exact match on the prefix.
+#
+# Output: one line per entry on stdout (meta entries first and last,
+#         apps in the middle).
+format_main_listing() {
+    echo "$META_ADD"
+    format_apps_listing
+    echo "$META_EXIT"
 }
 
 # extract_name_from_selection
@@ -347,66 +358,57 @@ format_listing() {
 #   $1  -  the raw selection coming from gum filter
 # Output: the application name on stdout
 extract_name_from_selection() {
-    printf '%s' "$1" | awk -v sep="$DISPLAY_SEP" -F"$DISPLAY_SEP" '{print $1}'
+    printf '%s' "$1" | awk -F"$DISPLAY_SEP" '{print $1}'
+}
+
+# has_apps
+# ----------------------------------------------------------------------------
+# Returns 0 (true) if at least one app is registered, 1 (false) otherwise.
+has_apps() {
+    [[ -n "$(read_apps)" ]]
+}
+
+# app_exists
+# ----------------------------------------------------------------------------
+# Returns 0 (true) if an app with the given name is registered.
+#
+# Arguments:
+#   $1  -  the application name to look up
+app_exists() {
+    local name="$1"
+    read_apps | awk -v FS="$DELIM" -v n="$name" \
+        '$1 == n {found=1} END {exit !found}'
 }
 
 # ============================================================================
-# CRUD OPERATIONS
+# ACTIONS  (operate on a single, already-selected application)
+# ============================================================================
+# These functions take the application name as their first argument and
+# perform the corresponding CRUD operation. They are shared between the
+# TUI (called after the user picks an app) and any future command that
+# might want to manipulate apps programmatically.
 # ============================================================================
 
-# action_run
+# action_run_app
 # ----------------------------------------------------------------------------
-# Displays a filterable, scrollable list of all registered apps. When the
-# user picks one, the script updates the 'last_used' date, shows the app
-# details for a brief moment, and finally launches the application with
-# 'exec', which replaces the current shell process.
-action_run() {
-    # Defensive: ensure the storage file exists before reading it.
-    init_apps_file
-
-    # Build the list of selectable options. We capture the listing in a
-    # variable so we can check whether there is at least one entry.
-    local listing
-    listing="$(format_listing)"
-
-    if [[ -z "$listing" ]]; then
-        # No apps registered: show a friendly message and return.
-        gum style --foreground 214 --margin "1 0" \
-        gum style --foreground 240 "Use 'Add a new application' to get started."
-        gum input --placeholder "Press Enter to continue..." >/dev/null
-        return
-    fi
-
-    # Show the filter prompt. The user can type to narrow down the list.
-    local selection
-    selection="$(printf '%s\n' "$listing" | gum filter \
-        --header "Select an application to run (type to filter):" \
-        --height 18 \
-        --prompt "▶ " \
-        --placeholder "Search by name or description..." \
-        --indicator "▶" \
-        --match.foreground 212 \
-        --text.foreground 255 \
-        --cursor-text.foreground 212)"
-
-    # An empty selection means the user cancelled (Esc or Ctrl+C).
-    [[ -z "$selection" ]] && return
-
-    # Extract the application name from the formatted line.
-    local selected_name
-    selected_name="$(extract_name_from_selection "$selection")"
-    [[ -z "$selected_name" ]] && return
-
-    # Look up the full record for the selected app and update last_used.
+# Updates the 'last_used' date of the given app, shows a brief details
+# card, and launches the application with 'exec', which replaces the
+# current shell process.
+#
+# Arguments:
+#   $1  -  the application name to run
+action_run_app() {
+    local app_name="$1"
     local now path_to_run description
     local -a records=()
     now="$(get_current_date)"
 
+    # Walk the catalogue and rebuild it with the updated last_used for
+    # the chosen app, while keeping every other entry untouched.
     while IFS="$DELIM" read -r name desc path created last_used; do
-        if [[ "$name" == "$selected_name" ]]; then
+        if [[ "$name" == "$app_name" ]]; then
             description="$desc"
             path_to_run="$path"
-            # Refresh the last_used timestamp for this entry.
             records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${now}")
         else
             records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${last_used}")
@@ -422,7 +424,7 @@ action_run() {
         --border-foreground 39 \
         --padding "0 1" \
         --margin "0 0 1 0" \
-        -- "$(gum style --foreground 212 --bold "$selected_name")" \
+        -- "$(gum style --foreground 212 --bold "$app_name")" \
         "" \
         "$(gum style --foreground 240 'Description: ') ${description}" \
         "$(gum style --foreground 240 'Path:       ') ${path_to_run}" \
@@ -437,18 +439,16 @@ action_run() {
     exec "$path_to_run"
 }
 
-# action_add
+# action_add_new
 # ----------------------------------------------------------------------------
-# Prompts the user for the name, description and path of a new application
-# and appends it to the YAML storage file. Duplicate names are rejected.
-action_add() {
+# Drives the three-step form to add a new application: name, description
+# and path. Duplicate names are rejected. This function is shared by the
+# TUI ("[+] Add new application") and by the interactive fallback of
+# the 'mytuis add' command.
+action_add_new() {
     local name desc path resolved now
 
-    # Defensive: ensure the storage file exists before reading it.
-    init_apps_file
-
     # --- 1. Name ----------------------------------------------------------
-    # The name cannot be empty; it is the unique identifier of the entry.
     name=$(gum input \
         --header "Add new application — Name" \
         --placeholder "Application name (e.g. nvim)" \
@@ -456,14 +456,12 @@ action_add() {
     [[ -z "$name" ]] && return
 
     # --- 2. Description ---------------------------------------------------
-    # The description is optional; the user may leave it empty.
     desc=$(gum input \
         --header "Add new application — Description" \
         --placeholder "What does it do?" \
         --prompt "Description: ")
 
     # --- 3. Path ----------------------------------------------------------
-    # The path may be absolute, relative or a bare command name.
     path=$(gum input \
         --header "Add new application — Path" \
         --placeholder "Absolute path, relative path, or command name in \$PATH" \
@@ -480,8 +478,7 @@ action_add() {
     fi
 
     # --- 5. Reject duplicate names ---------------------------------------
-    if read_apps | awk -v FS="$DELIM" -v n="$name" \
-            '$1 == n {found=1} END {exit !found}'; then
+    if app_exists "$name"; then
         gum style --foreground 196 --margin "1 0" \
             "✖ Error: an application named '$name' already exists."
         gum input --placeholder "Press Enter to continue..." >/dev/null
@@ -489,9 +486,6 @@ action_add() {
     fi
 
     # --- 6. Persist the new entry ----------------------------------------
-    # We read all existing apps, append the new record and rewrite the
-    # YAML file in one shot. last_used is left empty until the user
-    # actually launches the application for the first time.
     now="$(get_current_date)"
     {
         read_apps
@@ -504,42 +498,21 @@ action_add() {
     sleep 1
 }
 
-# action_edit
+# action_edit_app
 # ----------------------------------------------------------------------------
-# Lets the user pick an existing application and modify any of its
-# fields. The name, description and path can all be changed; the creation
-# date is preserved and the last_used timestamp is kept untouched.
-action_edit() {
-    # Defensive: ensure the storage file exists before reading it.
-    init_apps_file
+# Drives the edit form for a single, already-selected application. The
+# name, description and path can all be changed; the creation date is
+# preserved and the last_used timestamp is kept untouched.
+#
+# Arguments:
+#   $1  -  the application name to edit
+action_edit_app() {
+    local app_name="$1"
 
-    local listing
-    listing="$(format_listing)"
-
-    if [[ -z "$listing" ]]; then
-        gum style --foreground 214 --margin "1 0" \
-            "No applications to edit."
-        gum input --placeholder "Press Enter to continue..." >/dev/null
-        return
-    fi
-    local selection
-    selection="$(printf '%s\n' "$listing" | gum filter \
-        --header "Select an application to edit:" \
-        --height 15 \
-        --placeholder "Search..." \
-        --match.foreground 212 \
-        --text.foreground 255 \
-        --cursor-text.foreground 212)"
-    [[ -z "$selection" ]] && return
-
-    local selected_name
-    selected_name="$(extract_name_from_selection "$selection")"
-    [[ -z "$selected_name" ]] && return
-
-    # --- 2. Read the current values for that entry -----------------------
+    # --- 1. Read the current values for that entry -----------------------
     local old_name="" old_desc="" old_path="" old_created="" old_last_used=""
     while IFS="$DELIM" read -r name desc path created last_used; do
-        if [[ "$name" == "$selected_name" ]]; then
+        if [[ "$name" == "$app_name" ]]; then
             old_name="$name"
             old_desc="$desc"
             old_path="$path"
@@ -551,11 +524,11 @@ action_edit() {
 
     if [[ -z "$old_name" ]]; then
         gum style --foreground 196 --margin "1 0" \
-            "✖ Error: could not find data for '$selected_name'."
+            "✖ Error: could not find data for '$app_name'."
         return
     fi
 
-    # --- 3. Prompt for new values, pre-filled with the current ones ------
+    # --- 2. Prompt for new values, pre-filled with the current ones ------
     local new_name new_desc new_path resolved
     new_name=$(gum input \
         --header "Edit '$old_name' — Name" \
@@ -577,7 +550,7 @@ action_edit() {
         --value "$old_path")
     [[ -z "$new_path" ]] && return
 
-    # --- 4. Resolve the new path -----------------------------------------
+    # --- 3. Resolve the new path -----------------------------------------
     resolved="$(resolve_path "$new_path")"
     if [[ -z "$resolved" ]]; then
         gum style --foreground 196 --margin "1 0" \
@@ -586,10 +559,9 @@ action_edit() {
         return
     fi
 
-    # --- 5. If the name changed, ensure the new name is not taken --------
+    # --- 4. If the name changed, ensure the new name is not taken --------
     if [[ "$new_name" != "$old_name" ]]; then
-        if read_apps | awk -v FS="$DELIM" -v n="$new_name" \
-                '$1 == n {found=1} END {exit !found}'; then
+        if app_exists "$new_name"; then
             gum style --foreground 196 --margin "1 0" \
                 "✖ Error: an application named '$new_name' already exists."
             gum input --placeholder "Press Enter to continue..." >/dev/null
@@ -597,10 +569,7 @@ action_edit() {
         fi
     fi
 
-    # --- 6. Persist the changes ------------------------------------------
-    # We rebuild the file from scratch, replacing the edited entry and
-    # leaving the rest untouched. created is preserved and last_used is
-    # not changed by an edit operation.
+    # --- 5. Persist the changes ------------------------------------------
     while IFS="$DELIM" read -r name desc path created last_used; do
         if [[ "$name" == "$old_name" ]]; then
             printf '%s\n' "${new_name}${DELIM}${new_desc}${DELIM}${resolved}${DELIM}${created}${DELIM}${last_used}"
@@ -614,103 +583,335 @@ action_edit() {
     sleep 1
 }
 
-# action_delete
+# action_delete_app
 # ----------------------------------------------------------------------------
-# Asks the user to pick an application, requests confirmation, and then
-# removes the entry from the YAML storage file.
-action_delete() {
-    # Defensive: ensure the storage file exists before reading it.
-    init_apps_file
+# Asks for confirmation and then removes the given application from the
+# YAML storage file.
+#
+# Arguments:
+#   $1  -  the application name to delete
+action_delete_app() {
+    local app_name="$1"
 
-    local listing
-    listing="$(format_listing)"
-
-    if [[ -z "$listing" ]]; then
-        gum style --foreground 214 --margin "1 0" \
-            "No applications to delete."
-        gum input --placeholder "Press Enter to continue..." >/dev/null
-        return
-    fi
-
-    # --- 1. Pick the app --------------------------------------------------
-    local selection
-    selection="$(printf '%s\n' "$listing" | gum filter \
-        --header "Select an application to delete:" \
-        --height 15 \
-        --placeholder "Search..." \
-        --match.foreground 212 \
-        --text.foreground 255 \
-        --cursor-text.foreground 212)"
-    [[ -z "$selection" ]] && return
-
-    local selected_name
-    selected_name="$(extract_name_from_selection "$selection")"
-    [[ -z "$selected_name" ]] && return
-
-    # --- 2. Confirm -------------------------------------------------------
-    # gum confirm returns 0 on Yes, 1 on No and 130 on Ctrl+C.
+    # Ask for confirmation. gum confirm returns 0 on Yes, 1 on No,
+    # and a non-zero exit on Ctrl+C (caught by `set -e`).
     if ! gum confirm \
         --prompt.bold \
         --prompt.foreground 196 \
-        "Delete '$selected_name'? This cannot be undone."; then
+        "Delete '$app_name'? This cannot be undone."; then
         return
     fi
 
-    # --- 3. Persist -------------------------------------------------------
     # Re-emit every record except the one being deleted.
     while IFS="$DELIM" read -r name desc path created last_used; do
-        [[ "$name" == "$selected_name" ]] && continue
+        [[ "$name" == "$app_name" ]] && continue
         printf '%s\n' "${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${last_used}"
     done < <(read_apps) | write_apps
 
     gum style --foreground 82 --margin "1 0" \
-        "✔ Application '$selected_name' deleted."
+        "✔ Application '$app_name' deleted."
     sleep 1
 }
 
+# action_submenu
+# ----------------------------------------------------------------------------
+# Shows the per-application action menu after the user has picked an app
+# from the main list. The four options dispatch to the CRUD actions or
+# fall back to the main listing.
+#
+# Arguments:
+#   $1  -  the application name to operate on
+action_submenu() {
+    local app_name="$1"
+    local choice
+
+    choice=$(gum choose \
+        --header "What do you want to do with '$app_name'?" \
+        --height 8 \
+        --cursor "▶ " \
+        --item.foreground 255 \
+        --selected.foreground 212 \
+        "Run this application" \
+        "Edit this application" \
+        "Delete this application" \
+        "Back to list")
+
+    case "$choice" in
+        "Run this application")     action_run_app   "$app_name" ;;
+        "Edit this application")    action_edit_app  "$app_name" ;;
+        "Delete this application")  action_delete_app "$app_name" ;;
+        "Back to list"|"")          return           ;;
+        *)                          return           ;;
+    esac
+}
+
 # ============================================================================
-# MAIN LOOP
+# COMMAND-LINE INTERFACE
+# ============================================================================
+# These functions implement the 'mytuis <subcommand>' surface. They are
+# designed to work both interactively (gum styling when available and
+# stdout is a TTY) and in non-interactive scripts (plain text output).
 # ============================================================================
 
-# main
+# cmd_usage
 # ----------------------------------------------------------------------------
-# Entry point of the script. Performs the initial setup (dependency
-# check, file initialization) and then enters a loop that shows the
-# main menu and dispatches the chosen CRUD action. The loop terminates
-# when the user picks "Exit" or aborts with Ctrl+C.
-main() {
+# Prints the command-line usage information. Always uses plain text so
+# the help is readable when piped or redirected.
+cmd_usage() {
+    cat <<EOF
+mytuis — Application Manager
+
+Usage:
+  mytuis                       Open the interactive TUI.
+  mytuis list                  List all registered applications.
+  mytuis add [name desc path]  Add an application. Interactive if no
+                               arguments are provided.
+  mytuis remove <name>         Remove an application by name.
+  mytuis help                  Show this help message.
+
+Data is stored in: ${APPS_FILE}
+
+Examples:
+  mytuis
+  mytuis list
+  mytuis add nvim "Modal text editor" nvim
+  mytuis add yt-dlp "Video downloader" /usr/local/bin/yt-dlp
+  mytuis remove nvim
+EOF
+}
+
+# cmd_list
+# ----------------------------------------------------------------------------
+# Prints the catalogue as a table. When stdout is a TTY and gum is
+# available the table is rendered with colours and borders; otherwise a
+# plain tab-separated layout is produced so the output is easy to grep
+# or pipe into other tools.
+cmd_list() {
+    init_apps_file
+    local listing
+    listing="$(read_apps)"
+
+    if [[ -z "$listing" ]]; then
+        if [[ -t 1 ]] && command -v gum >/dev/null 2>&1; then
+            gum style --foreground 214 --margin "1 0" \
+                "No applications registered yet."
+        else
+            echo "No applications registered yet."
+        fi
+        return
+    fi
+
+    # Convert DELIM-separated records into tab-separated rows for table
+    # output. The description is truncated to keep the table compact.
+    local rows
+    rows="$(printf '%s\n' "$listing" | \
+        awk -F"$DELIM" -v OFS='\t' -v TRUNC=60 '
+            {
+                desc = $2
+                if (length(desc) > TRUNC) desc = substr(desc, 1, TRUNC - 1) "…"
+                print $1, desc, $3, $4, $5
+            }')"
+
+    if [[ -t 1 ]] && command -v gum >/dev/null 2>&1; then
+        # Pretty rendering when running in a terminal. 'gum table' does
+        # not expose a foreground color for the border, so we just pick
+        # a clean rounded style and let the default colour apply.
+        printf '%s\n' "$rows" | \
+            gum table \
+                --separator $'\t' \
+                --columns "Name,Description,Path,Created,Last used" \
+                --border rounded \
+                --print
+    else
+        # Plain rendering suitable for pipes and scripts.
+        printf '%s\n' "$rows" | \
+            column -t -s $'\t' 2>/dev/null || printf '%s\n' "$rows"
+    fi
+}
+
+# cmd_add
+# ----------------------------------------------------------------------------
+# Handles the 'mytuis add' command.
+#
+# Behaviour:
+#   * 0 arguments: open the interactive add form (action_add_new).
+#   * 3 arguments: add the application non-interactively using the
+#     provided name, description and path.
+#   * Any other count: print usage and exit non-zero.
+cmd_add() {
+    init_apps_file
+    local name desc path resolved now
+
+    if [[ $# -eq 0 ]]; then
+        # Interactive mode: fall back to the TUI form.
+        action_add_new
+        return
+    fi
+
+    if [[ $# -ne 3 ]]; then
+        echo "Usage: mytuis add <name> <description> <path>" >&2
+        exit 1
+    fi
+
+    name="$1"
+    desc="$2"
+    path="$3"
+
+    # --- Validate the path ----------------------------------------------
+    resolved="$(resolve_path "$path")"
+    if [[ -z "$resolved" ]]; then
+        echo "Error: could not resolve path: $path" >&2
+        exit 1
+    fi
+
+    # --- Reject duplicate names -----------------------------------------
+    if app_exists "$name"; then
+        echo "Error: an application named '$name' already exists." >&2
+        exit 1
+    fi
+
+    # --- Persist --------------------------------------------------------
+    now="$(get_current_date)"
+    {
+        read_apps
+        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${resolved}${DELIM}${now}${DELIM}"
+    } | write_apps
+
+    echo "✔ Added '$name' -> $resolved"
+}
+
+# cmd_remove
+# ----------------------------------------------------------------------------
+# Handles the 'mytuis remove <name>' command.
+#
+# Behaviour:
+#   * With a name argument: look up the application, optionally ask for
+#     confirmation when running in a TTY, and remove it.
+#   * Without arguments: print usage and exit non-zero.
+cmd_remove() {
+    init_apps_file
+    local name="${1:-}"
+
+    if [[ -z "$name" ]]; then
+        echo "Usage: mytuis remove <name>" >&2
+        exit 1
+    fi
+
+    if ! app_exists "$name"; then
+        echo "Error: no application named '$name'." >&2
+        exit 1
+    fi
+
+    # Ask for confirmation only when stdin is attached to a terminal and
+    # gum is available. Scripts that pipe 'yes' or just want to skip
+    # confirmation can use 'mytuis remove <name> < /dev/null'.
+    if [[ -t 0 ]] && command -v gum >/dev/null 2>&1; then
+        if ! gum confirm "Remove '$name'?"; then
+            echo "Cancelled."
+            return
+        fi
+    fi
+
+    while IFS="$DELIM" read -r n d p c lu; do
+        [[ "$n" == "$name" ]] && continue
+        printf '%s\n' "${n}${DELIM}${d}${DELIM}${p}${DELIM}${c}${DELIM}${lu}"
+    done < <(read_apps) | write_apps
+
+    echo "✔ Removed '$name'"
+}
+
+# ============================================================================
+# INTERACTIVE TUI
+# ============================================================================
+
+# main_tui
+# ----------------------------------------------------------------------------
+# Entry point of the interactive interface. The first thing the user sees
+# is the catalogue listing framed by two meta entries. Selecting a meta
+# entry triggers a global action; selecting an app opens the per-app
+# sub-menu. The loop terminates when the user picks the [x] Exit entry
+# or sends Ctrl+C.
+main_tui() {
     check_dependencies
     init_apps_file
 
     while true; do
-        # Clear the screen and show a styled header on every iteration
-        # so the user always sees a fresh view of the menu.
+        # Clear the screen and show the styled header on every iteration
+        # so the user always sees a fresh view of the catalogue.
         clear
         show_header
 
-        # Show the top-level menu and capture the chosen action.
-        local choice
-        choice=$(gum choose \
-            --header "What do you want to do?" \
-            --height 9 \
-            --cursor "▶ " \
-            --item.foreground 255 \
-            --selected.foreground 212 \
-            "Run an application" \
-            "Add a new application" \
-            "Edit an application" \
-            "Delete an application" \
-            "Exit")
+        local listing selection
+        listing="$(format_main_listing)"
 
-        case "$choice" in
-            "Run an application")     action_run   ;;
-            "Add a new application")  action_add   ;;
-            "Edit an application")    action_edit  ;;
-            "Delete an application")  action_delete ;;
-            "Exit")                   exit 0       ;;
-            *)                        ;;           # ignore empty selection
+        if [[ -z "$(read_apps)" ]]; then
+            # No apps registered: show the empty state below the header.
+            gum style --foreground 214 --margin "1 0" \
+                "No applications registered yet."
+            gum style --foreground 240 \
+                "Pick '[+] Add new application' below to get started."
+        fi
+
+        # Show the filterable list. The user can type to narrow down the
+        # matches; both apps and meta entries are filterable.
+        selection="$(printf '%s\n' "$listing" | gum filter \
+            --header "Pick an app, add a new one, or exit (type to filter):" \
+            --height 18 \
+            --prompt "▶ " \
+            --placeholder "Search..." \
+            --indicator "▶" \
+            --match.foreground 212 \
+            --text.foreground 255 \
+            --cursor-text.foreground 212)"
+
+        # An empty selection means the user cancelled (Esc / Ctrl+C).
+        [[ -z "$selection" ]] && continue
+
+        # Dispatch based on whether the selection is a meta entry or a
+        # real application.
+        case "$selection" in
+            "$META_ADD")
+                action_add_new
+                ;;
+            "$META_EXIT")
+                exit 0
+                ;;
+            *)
+                local app_name
+                app_name="$(extract_name_from_selection "$selection")"
+                if [[ -n "$app_name" ]]; then
+                    action_submenu "$app_name"
+                fi
+                ;;
         esac
     done
+}
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+# main
+# ----------------------------------------------------------------------------
+# Top-level dispatcher. Parses the command-line arguments and routes to
+# either the interactive TUI or one of the CLI sub-commands. When the
+# script is sourced (rather than executed directly) the dispatcher is
+# skipped so the helper functions can be tested in isolation.
+main() {
+    # Sub-command dispatch. Anything that is not a recognised command is
+    # treated as an unknown argument and produces a usage message.
+    case "${1:-}" in
+        "")             main_tui ;;
+        list|ls)        cmd_list ;;
+        add)            shift; cmd_add "$@" ;;
+        remove|rm|del)  shift; cmd_remove "${1:-}" ;;
+        help|-h|--help) cmd_usage ;;
+        *)
+            echo "Unknown command: $1" >&2
+            cmd_usage >&2
+            exit 1
+            ;;
+    esac
 }
 
 # Only run main if the script is executed directly, not when sourced.
