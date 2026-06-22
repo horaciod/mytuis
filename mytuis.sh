@@ -60,6 +60,18 @@ readonly DISPLAY_SEP=' — '
 readonly META_ADD='[+] Add new application'
 readonly META_EXIT='[x] Exit'
 
+# RESOLVED_ARGS: global that resolve_path populates with the trailing
+# argument string whenever the input contains whitespace. Pre-declared
+# so callers can safely read it under `set -u` even before any call.
+RESOLVED_ARGS=""
+
+# RESOLVED_PATH: global that resolve_path populates with the resolved
+# absolute path (or leaves empty if resolution failed). Declared for the
+# same reason as RESOLVED_ARGS: callers must call resolve_path directly
+# (not inside `$()`) for the assignment to propagate, and they may read
+# this global even before any call.
+RESOLVED_PATH=""
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -106,49 +118,71 @@ get_current_date() {
 
 # resolve_path
 # ----------------------------------------------------------------------------
-# Resolves a user-supplied path or command name to an absolute, existing
-# filesystem path.
+# Resolves a user-supplied command (optionally followed by arguments)
+# to an absolute, existing filesystem path. The first whitespace-delimited
+# word of the input is treated as the executable; everything after it is
+# treated as the argument string.
 #
-# Resolution rules (in order):
+# IMPORTANT: this function communicates its results through globals
+# (RESOLVED_PATH and RESOLVED_ARGS), NOT through stdout. Callers MUST
+# invoke it directly — never inside a `$()` command substitution —
+# because a subshell would discard the global assignments. The pattern
+# is:
+#
+#     resolve_path "$input"          # NO $() around the call
+#     [[ -z "$RESOLVED_PATH" ]] && { error handling; return; }
+#     path="$RESOLVED_PATH"
+#     args="$RESOLVED_ARGS"
+#
+# Resolution rules (in order, applied to the executable word only):
 #   1. Expand a leading "~" or "~/" to the value of $HOME.
-#   2. If the input is an absolute path that exists, return it as-is.
-#   3. If the input is a relative path (./foo or ../foo), resolve it from
-#      the current working directory.
+#   2. If the executable is an absolute path that exists, use it.
+#   3. If it's a relative path (./foo or ../foo), resolve from CWD.
 #   4. Otherwise treat it as a command name and look it up in $PATH.
 #
 # Arguments:
-#   $1  -  the path or command name to resolve
-# Output:
-#   Prints the resolved absolute path on stdout, or nothing if it could
-#   not be resolved to an existing file.
+#   $1  -  the command, optionally followed by arguments
+# Globals set:
+#   RESOLVED_PATH  -  the resolved absolute path (empty on failure)
+#   RESOLVED_ARGS  -  the trailing argument string (empty if none)
 resolve_path() {
     local input="$1"
+    RESOLVED_ARGS=""
+    RESOLVED_PATH=""
 
-    # Rule 1: expand a leading tilde to the user's home directory.
-    input="${input/#\~/$HOME}"
+    # Split the input into the executable word and the rest.
+    local exec_part="${input%% *}"
+    if [[ "$exec_part" != "$input" ]]; then
+        local rest="${input#"$exec_part"}"
+        # Trim leading whitespace from the trailing portion.
+        RESOLVED_ARGS="${rest#"${rest%%[![:space:]]*}"}"
+    fi
+
+    # Rule 1: expand a leading tilde on the executable only.
+    exec_part="${exec_part/#\~/$HOME}"
 
     # Rule 2: absolute path that exists on disk.
-    if [[ "$input" = /* ]] && [[ -e "$input" ]]; then
-        echo "$input"
+    if [[ "$exec_part" = /* ]] && [[ -e "$exec_part" ]]; then
+        RESOLVED_PATH="$exec_part"
         return
     fi
 
     # Rule 3: relative path that lives in the current directory.
-    if [[ "$input" = ./* || "$input" = ../* ]]; then
+    if [[ "$exec_part" = ./* || "$exec_part" = ../* ]]; then
         local dir resolved
-        dir="$(dirname "$input")"
-        resolved="$(cd "$dir" 2>/dev/null && pwd)/$(basename "$input")"
+        dir="$(dirname "$exec_part")"
+        resolved="$(cd "$dir" 2>/dev/null && pwd)/$(basename "$exec_part")"
         if [[ -e "$resolved" ]]; then
-            echo "$resolved"
+            RESOLVED_PATH="$resolved"
         fi
         return
     fi
 
     # Rule 4: look the name up in $PATH.
     local found
-    found="$(command -v "$input" 2>/dev/null || true)"
+    found="$(command -v "$exec_part" 2>/dev/null || true)"
     if [[ -n "$found" && -e "$found" ]]; then
-        echo "$found"
+        RESOLVED_PATH="$found"
     fi
 }
 
@@ -186,9 +220,12 @@ truncate() {
 # Reads all applications from the YAML file and writes one line per app to
 # stdout. The fields of each line are separated by DELIM and appear in the
 # following order:
-#     name<delim>description<delim>path<delim>created<delim>last_used
-# If the file is empty or contains no apps, the function produces no
-# output. This is the only place where the YAML file is parsed.
+#     name<delim>description<delim>path<delim>args<delim>created<delim>last_used
+# The `args` field is optional: when the YAML entry has no `args:` line
+# the value is emitted as the empty string, which keeps the consumer-side
+# code uniform regardless of file age. If the file is empty or contains
+# no apps, the function produces no output. This is the only place where
+# the YAML file is parsed.
 read_apps() {
     # The single-quote character is passed in via -v SQ to keep the awk
     # script free of awkward backslash-escaping.
@@ -218,10 +255,11 @@ read_apps() {
     # Match the start of a new app entry (line "- name: ...").
     /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
         # Emit the previously buffered entry before starting a new one.
-        if (name != "") print name, desc, path, created, last_used
+        if (name != "") print name, desc, path, args, created, last_used
         name      = extract_value($0)
         desc      = ""
         path      = ""
+        args      = ""
         created   = ""
         last_used = ""
         next
@@ -230,11 +268,12 @@ read_apps() {
     # Match the remaining fields of the current app entry.
     /^[[:space:]]+description:[[:space:]]*/ { desc      = extract_value($0); next }
     /^[[:space:]]+path:[[:space:]]*/        { path      = extract_value($0); next }
+    /^[[:space:]]+args:[[:space:]]*/        { args      = extract_value($0); next }
     /^[[:space:]]+created:[[:space:]]*/     { created   = extract_value($0); next }
     /^[[:space:]]+last_used:[[:space:]]*/   { last_used = extract_value($0); next }
 
     # At end-of-file, emit the last buffered entry (if any).
-    END { if (name != "") print name, desc, path, created, last_used }
+    END { if (name != "") print name, desc, path, args, created, last_used }
     ' "$APPS_FILE"
 }
 
@@ -242,8 +281,10 @@ read_apps() {
 # ----------------------------------------------------------------------------
 # Rewrites the YAML storage file using the data piped via stdin. Each input
 # line must be a record in the format produced by read_apps:
-#     name<delim>description<delim>path<delim>created<delim>last_used
-# The file is fully replaced on every call, which keeps the implementation
+#     name<delim>description<delim>path<delim>args<delim>created<delim>last_used
+# The `args` field is optional: when it is empty for a given entry the
+# `args:` line is omitted from the YAML to keep the file compact. The
+# file is fully replaced on every call, which keeps the implementation
 # simple and avoids complex in-place editing.
 write_apps() {
     # First, read all incoming records into parallel arrays. The arrays
@@ -251,15 +292,16 @@ write_apps() {
     # the caller pipes an empty stream. This matters because the script
     # runs with `set -u`, which would otherwise abort on the later
     # `${#names[@]}` check.
-    local -a names=() descs=() paths=() createds=() last_useds=()
-    local name desc path created last_used
+    local -a names=() descs=() paths=() argss=() createds=() last_useds=()
+    local name desc path args created last_used
 
-    while IFS="$DELIM" read -r name desc path created last_used; do
+    while IFS="$DELIM" read -r name desc path args created last_used; do
         # Skip empty lines (defensive; should not happen in practice).
         [[ -z "$name" ]] && continue
         names+=("$name")
         descs+=("$desc")
         paths+=("$path")
+        argss+=("$args")
         createds+=("$created")
         last_useds+=("$last_used")
     done
@@ -274,17 +316,23 @@ write_apps() {
             echo "apps: []"
         else
             echo "apps:"
-            local i esc_name esc_desc esc_path esc_created esc_last
+            local i esc_name esc_desc esc_path esc_args esc_created esc_last
             for i in "${!names[@]}"; do
                 # In single-quoted YAML strings, a literal single quote is
                 # represented by doubling it ('' -> ').
                 esc_name="${names[$i]//\'/\'\'}"
                 esc_desc="${descs[$i]//\'/\'\'}"
                 esc_path="${paths[$i]//\'/\'\'}"
+                esc_args="${argss[$i]//\'/\'\'}"
                 esc_created="${createds[$i]//\'/\'\'}"
                 echo "  - name: '${esc_name}'"
                 echo "    description: '${esc_desc}'"
                 echo "    path: '${esc_path}'"
+                # Only emit args when non-empty so files for apps that
+                # take no parameters stay tidy.
+                if [[ -n "${argss[$i]}" ]]; then
+                    echo "    args: '${esc_args}'"
+                fi
                 echo "    created: '${esc_created}'"
                 # Only emit last_used if it has been set at least once.
                 if [[ -n "${last_useds[$i]}" ]]; then
@@ -320,11 +368,14 @@ show_header() {
 # Builds the plain listing of apps (one per line) used by the TUI filter
 # and by the CLI list command. Each entry is formatted as:
 #     "name — description"
-# so the user can identify every app at a glance.
+# so the user can identify every app at a glance. The `args` field is
+# intentionally left out of the filter listing because long argument
+# strings would clutter the menu; the user sees them in the launch card
+# and in the `mytuis list` table instead.
 #
 # Output: one line per registered app on stdout
 format_apps_listing() {
-    while IFS="$DELIM" read -r name desc _path _created _last_used; do
+    while IFS="$DELIM" read -r name desc _path _args _created _last_used; do
         [[ -z "$name" ]] && continue
         local short_desc
         short_desc="$(truncate "$desc" 60)"
@@ -393,25 +444,28 @@ app_exists() {
 # ----------------------------------------------------------------------------
 # Updates the 'last_used' date of the given app, shows a brief details
 # card, and launches the application with 'exec', which replaces the
-# current shell process.
+# current shell process. If the entry has stored arguments they are
+# split into a bash array (without glob expansion) and forwarded to the
+# executable.
 #
 # Arguments:
 #   $1  -  the application name to run
 action_run_app() {
     local app_name="$1"
-    local now path_to_run description
+    local now path_to_run description run_args
     local -a records=()
     now="$(get_current_date)"
 
     # Walk the catalogue and rebuild it with the updated last_used for
     # the chosen app, while keeping every other entry untouched.
-    while IFS="$DELIM" read -r name desc path created last_used; do
+    while IFS="$DELIM" read -r name desc path args created last_used; do
         if [[ "$name" == "$app_name" ]]; then
             description="$desc"
             path_to_run="$path"
-            records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${now}")
+            run_args="$args"
+            records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${args}${DELIM}${created}${DELIM}${now}")
         else
-            records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${last_used}")
+            records+=("${name}${DELIM}${desc}${DELIM}${path}${DELIM}${args}${DELIM}${created}${DELIM}${last_used}")
         fi
     done < <(read_apps)
 
@@ -419,6 +473,7 @@ action_run_app() {
     printf '%s\n' "${records[@]}" | write_apps
 
     # Show a brief details card before launching the app.
+    local args_display="${run_args:-<none>}"
     gum style \
         --border rounded \
         --border-foreground 39 \
@@ -428,6 +483,7 @@ action_run_app() {
         "" \
         "$(gum style --foreground 240 'Description: ') ${description}" \
         "$(gum style --foreground 240 'Path:       ') ${path_to_run}" \
+        "$(gum style --foreground 240 'Arguments:  ') ${args_display}" \
         "" \
         "$(gum style --foreground 82 --bold 'Launching...')"
 
@@ -435,18 +491,30 @@ action_run_app() {
     sleep 0.4
 
     # Replace the current shell process with the selected application.
-    # Quoting "$path_to_run" preserves paths that contain spaces.
-    exec "$path_to_run"
+    # `read -ra` splits the argument string on IFS (whitespace by default)
+    # without performing glob expansion, so paths like '/datos/pepe' or
+    # wildcards passed verbatim by the user are preserved literally.
+    if [[ -n "$run_args" ]]; then
+        local -a args_array
+        # shellcheck disable=SC2206
+        read -ra args_array <<< "$run_args"
+        exec "$path_to_run" "${args_array[@]}"
+    else
+        exec "$path_to_run"
+    fi
 }
 
 # action_add_new
 # ----------------------------------------------------------------------------
 # Drives the three-step form to add a new application: name, description
-# and path. Duplicate names are rejected. This function is shared by the
-# TUI ("[+] Add new application") and by the interactive fallback of
-# the 'mytuis add' command.
+# and command. The command field accepts both a bare executable ("firefox")
+# and a command with arguments ("ls -lad", "code /datos/pepe"); the
+# executable word is resolved to an absolute path while the trailing
+# tokens are stored verbatim in the `args` field. Duplicate names are
+# rejected. This function is shared by the TUI ("[+] Add new application")
+# and by the interactive fallback of the 'mytuis add' command.
 action_add_new() {
-    local name desc path resolved now
+    local name desc path resolved now args_to_save
 
     # --- 1. Name ----------------------------------------------------------
     name=$(gum input \
@@ -461,21 +529,26 @@ action_add_new() {
         --placeholder "What does it do?" \
         --prompt "Description: ")
 
-    # --- 3. Path ----------------------------------------------------------
+    # --- 3. Command (executable, optionally with arguments) ---------------
     path=$(gum input \
-        --header "Add new application — Path" \
-        --placeholder "Absolute path, relative path, or command name in \$PATH" \
-        --prompt "Path: ")
+        --header "Add new application — Command" \
+        --placeholder "e.g. firefox, ls -lad, code /datos/pepe" \
+        --prompt "Command: ")
     [[ -z "$path" ]] && return
 
-    # --- 4. Resolve the path ---------------------------------------------
-    resolved="$(resolve_path "$path")"
-    if [[ -z "$resolved" ]]; then
+    # --- 4. Resolve the command ------------------------------------------
+    # resolve_path sets RESOLVED_PATH and RESOLVED_ARGS as globals. It
+    # must NOT be called inside `$()` because the subshell would discard
+    # the assignments. Call it directly and read the globals afterwards.
+    resolve_path "$path"
+    if [[ -z "$RESOLVED_PATH" ]]; then
         gum style --foreground 196 --margin "1 0" \
-            "✖ Error: could not resolve path: $path"
+            "✖ Error: could not resolve command: $path"
         gum input --placeholder "Press Enter to continue..." >/dev/null
         return
     fi
+    resolved="$RESOLVED_PATH"
+    args_to_save="$RESOLVED_ARGS"
 
     # --- 5. Reject duplicate names ---------------------------------------
     if app_exists "$name"; then
@@ -489,7 +562,7 @@ action_add_new() {
     now="$(get_current_date)"
     {
         read_apps
-        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${resolved}${DELIM}${now}${DELIM}"
+        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${resolved}${DELIM}${args_to_save}${DELIM}${now}${DELIM}"
     } | write_apps
 
     # --- 7. Confirm -------------------------------------------------------
@@ -501,8 +574,11 @@ action_add_new() {
 # action_edit_app
 # ----------------------------------------------------------------------------
 # Drives the edit form for a single, already-selected application. The
-# name, description and path can all be changed; the creation date is
-# preserved and the last_used timestamp is kept untouched.
+# name, description, command and arguments can all be changed; the
+# creation date is preserved and the last_used timestamp is kept
+# untouched. The Command field accepts both bare executables and full
+# command lines ("ls -lad"); arguments typed in the Command field are
+# concatenated with anything entered in the separate Arguments field.
 #
 # Arguments:
 #   $1  -  the application name to edit
@@ -510,12 +586,13 @@ action_edit_app() {
     local app_name="$1"
 
     # --- 1. Read the current values for that entry -----------------------
-    local old_name="" old_desc="" old_path="" old_created="" old_last_used=""
-    while IFS="$DELIM" read -r name desc path created last_used; do
+    local old_name="" old_desc="" old_path="" old_args="" old_created="" old_last_used=""
+    while IFS="$DELIM" read -r name desc path args created last_used; do
         if [[ "$name" == "$app_name" ]]; then
             old_name="$name"
             old_desc="$desc"
             old_path="$path"
+            old_args="$args"
             old_created="$created"
             old_last_used="$last_used"
             break
@@ -529,7 +606,7 @@ action_edit_app() {
     fi
 
     # --- 2. Prompt for new values, pre-filled with the current ones ------
-    local new_name new_desc new_path resolved
+    local new_name new_desc new_path new_args resolved combined_args
     new_name=$(gum input \
         --header "Edit '$old_name' — Name" \
         --placeholder "Application name" \
@@ -544,37 +621,54 @@ action_edit_app() {
         --value "$old_desc")
 
     new_path=$(gum input \
-        --header "Edit '$old_name' — Path" \
-        --placeholder "Absolute path, relative path, or command name in \$PATH" \
-        --prompt "Path: " \
+        --header "Edit '$old_name' — Command" \
+        --placeholder "Bare executable or full command line" \
+        --prompt "Command: " \
         --value "$old_path")
     [[ -z "$new_path" ]] && return
 
-    # --- 3. Resolve the new path -----------------------------------------
-    resolved="$(resolve_path "$new_path")"
-    if [[ -z "$resolved" ]]; then
+    new_args=$(gum input \
+        --header "Edit '$old_name' — Arguments" \
+        --placeholder "Optional arguments, e.g. -lad or /datos/pepe" \
+        --prompt "Arguments: " \
+        --value "$old_args")
+
+    # --- 3. Resolve the new command --------------------------------------
+    # resolve_path must be called directly (not inside $()) so its
+    # global assignments to RESOLVED_PATH and RESOLVED_ARGS survive.
+    resolve_path "$new_path"
+    if [[ -z "$RESOLVED_PATH" ]]; then
         gum style --foreground 196 --margin "1 0" \
-            "✖ Error: could not resolve path: $new_path"
+            "✖ Error: could not resolve command: $new_path"
+        gum input --placeholder "Press Enter to continue..." >/dev/null
+        return
+    fi
+    resolved="$RESOLVED_PATH"
+
+    # Combine any args parsed out of the Command field with whatever
+    # the user typed in the separate Arguments field.
+    if [[ -n "$RESOLVED_ARGS" && -n "$new_args" ]]; then
+        combined_args="${RESOLVED_ARGS} ${new_args}"
+    elif [[ -n "$RESOLVED_ARGS" ]]; then
+        combined_args="$RESOLVED_ARGS"
+    else
+        combined_args="$new_args"
+    fi
+
+    # --- 4. If the name changed, ensure the new name is not taken --------
+    if [[ "$new_name" != "$old_name" ]] && app_exists "$new_name"; then
+        gum style --foreground 196 --margin "1 0" \
+            "✖ Error: an application named '$new_name' already exists."
         gum input --placeholder "Press Enter to continue..." >/dev/null
         return
     fi
 
-    # --- 4. If the name changed, ensure the new name is not taken --------
-    if [[ "$new_name" != "$old_name" ]]; then
-        if app_exists "$new_name"; then
-            gum style --foreground 196 --margin "1 0" \
-                "✖ Error: an application named '$new_name' already exists."
-            gum input --placeholder "Press Enter to continue..." >/dev/null
-            return
-        fi
-    fi
-
     # --- 5. Persist the changes ------------------------------------------
-    while IFS="$DELIM" read -r name desc path created last_used; do
+    while IFS="$DELIM" read -r name desc path args created last_used; do
         if [[ "$name" == "$old_name" ]]; then
-            printf '%s\n' "${new_name}${DELIM}${new_desc}${DELIM}${resolved}${DELIM}${created}${DELIM}${last_used}"
+            printf '%s\n' "${new_name}${DELIM}${new_desc}${DELIM}${resolved}${DELIM}${combined_args}${DELIM}${created}${DELIM}${last_used}"
         else
-            printf '%s\n' "${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${last_used}"
+            printf '%s\n' "${name}${DELIM}${desc}${DELIM}${path}${DELIM}${args}${DELIM}${created}${DELIM}${last_used}"
         fi
     done < <(read_apps) | write_apps
 
@@ -603,9 +697,9 @@ action_delete_app() {
     fi
 
     # Re-emit every record except the one being deleted.
-    while IFS="$DELIM" read -r name desc path created last_used; do
+    while IFS="$DELIM" read -r name desc path args created last_used; do
         [[ "$name" == "$app_name" ]] && continue
-        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${path}${DELIM}${created}${DELIM}${last_used}"
+        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${path}${DELIM}${args}${DELIM}${created}${DELIM}${last_used}"
     done < <(read_apps) | write_apps
 
     gum style --foreground 82 --margin "1 0" \
@@ -702,14 +796,18 @@ cmd_list() {
     fi
 
     # Convert DELIM-separated records into tab-separated rows for table
-    # output. The description is truncated to keep the table compact.
+    # output. The description and the args string are truncated to keep
+    # the table compact. read_apps emits six fields per entry; the
+    # layout below matches: name, desc, path, args, created, last_used.
     local rows
     rows="$(printf '%s\n' "$listing" | \
-        awk -F"$DELIM" -v OFS='\t' -v TRUNC=60 '
+        awk -F"$DELIM" -v OFS='\t' -v TRUNC=40 '
             {
                 desc = $2
                 if (length(desc) > TRUNC) desc = substr(desc, 1, TRUNC - 1) "…"
-                print $1, desc, $3, $4, $5
+                args = $4
+                if (length(args) > TRUNC) args = substr(args, 1, TRUNC - 1) "…"
+                print $1, desc, $3, args, $5, $6
             }')"
 
     if [[ -t 1 ]] && command -v gum >/dev/null 2>&1; then
@@ -719,7 +817,7 @@ cmd_list() {
         printf '%s\n' "$rows" | \
             gum table \
                 --separator $'\t' \
-                --columns "Name,Description,Path,Created,Last used" \
+                --columns "Name,Description,Path,Arguments,Created,Last used" \
                 --border rounded \
                 --print
     else
@@ -735,12 +833,15 @@ cmd_list() {
 #
 # Behaviour:
 #   * 0 arguments: open the interactive add form (action_add_new).
-#   * 3 arguments: add the application non-interactively using the
-#     provided name, description and path.
+#   * 3 arguments: add the application non-interactively. The third
+#     argument may be a bare command ('firefox') or a full command line
+#     ('ls -lad', 'code /datos/pepe'); the executable word is resolved
+#     to an absolute path and the trailing tokens are stored verbatim
+#     in the `args` field.
 #   * Any other count: print usage and exit non-zero.
 cmd_add() {
     init_apps_file
-    local name desc path resolved now
+    local name desc path resolved now args_to_save
 
     if [[ $# -eq 0 ]]; then
         # Interactive mode: fall back to the TUI form.
@@ -749,7 +850,7 @@ cmd_add() {
     fi
 
     if [[ $# -ne 3 ]]; then
-        echo "Usage: mytuis add <name> <description> <path>" >&2
+        echo "Usage: mytuis add <name> <description> <command>" >&2
         exit 1
     fi
 
@@ -757,12 +858,16 @@ cmd_add() {
     desc="$2"
     path="$3"
 
-    # --- Validate the path ----------------------------------------------
-    resolved="$(resolve_path "$path")"
-    if [[ -z "$resolved" ]]; then
-        echo "Error: could not resolve path: $path" >&2
+    # --- Validate the command -------------------------------------------
+    # resolve_path sets RESOLVED_PATH and RESOLVED_ARGS as globals. We
+    # call it directly (not inside $()) so the assignments survive.
+    resolve_path "$path"
+    if [[ -z "$RESOLVED_PATH" ]]; then
+        echo "Error: could not resolve command: $path" >&2
         exit 1
     fi
+    resolved="$RESOLVED_PATH"
+    args_to_save="$RESOLVED_ARGS"
 
     # --- Reject duplicate names -----------------------------------------
     if app_exists "$name"; then
@@ -774,10 +879,14 @@ cmd_add() {
     now="$(get_current_date)"
     {
         read_apps
-        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${resolved}${DELIM}${now}${DELIM}"
+        printf '%s\n' "${name}${DELIM}${desc}${DELIM}${resolved}${DELIM}${args_to_save}${DELIM}${now}${DELIM}"
     } | write_apps
 
-    echo "✔ Added '$name' -> $resolved"
+    if [[ -n "$args_to_save" ]]; then
+        echo "✔ Added '$name' -> $resolved $args_to_save"
+    else
+        echo "✔ Added '$name' -> $resolved"
+    fi
 }
 
 # cmd_remove
@@ -812,9 +921,9 @@ cmd_remove() {
         fi
     fi
 
-    while IFS="$DELIM" read -r n d p c lu; do
+    while IFS="$DELIM" read -r n d p a c lu; do
         [[ "$n" == "$name" ]] && continue
-        printf '%s\n' "${n}${DELIM}${d}${DELIM}${p}${DELIM}${c}${DELIM}${lu}"
+        printf '%s\n' "${n}${DELIM}${d}${DELIM}${p}${DELIM}${a}${DELIM}${c}${DELIM}${lu}"
     done < <(read_apps) | write_apps
 
     echo "✔ Removed '$name'"

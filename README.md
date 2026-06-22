@@ -108,15 +108,37 @@ You will be asked for three things:
 1. **Name** — a short identifier (must be unique).
 2. **Description** — free-form text, shown in the list and in the
    launch card.
-3. **Path** — any of the following forms is accepted:
+3. **Command** — accepts any of the following forms:
+   - A bare **executable**: `firefox`, `nvim`
    - An **absolute** path: `/usr/bin/firefox`
    - A **relative** path: `./scripts/myscript.sh`
    - A **tilde** path: `~/bin/myscript.sh`
-   - A bare **command name** available in `$PATH`: `firefox`
+   - A **command with arguments**: `ls -lad`, `code /datos/pepe`,
+     `git -C ~/repo commit -m "msg"`
+
+   The first whitespace-delimited word is resolved to an absolute path
+   (or matched against `$PATH`); everything after it is stored in a
+   separate `args` field and forwarded verbatim to the executable at
+   launch time.
 
 `last_used` is updated automatically every time you launch the app
 through the manager. The `created` date is set on add and is preserved
 across edits.
+
+### Editing an application
+
+The edit form has four fields:
+
+1. **Name**
+2. **Description**
+3. **Command** — pre-filled with the current executable. Type a new
+   command (with or without arguments) to change both the executable
+   and the arguments in one go.
+4. **Arguments** — pre-filled with the current arguments. Useful when
+   you only want to tweak flags without touching the executable.
+
+Anything you type in the Command field after the executable word is
+concatenated with whatever is in the Arguments field, in that order.
 
 ### Examples
 
@@ -131,6 +153,10 @@ mytuis list | grep firefox
 # Add an app non-interactively
 mytuis add nvim "Modal text editor" nvim
 mytuis add yt-dlp "Video downloader" /usr/local/bin/yt-dlp
+
+# Add an app with arguments
+mytuis add lsl "Listado largo" "ls -lad"
+mytuis add code-pepe "Abrir code en /datos/pepe" "code /datos/pepe"
 
 # Add an app interactively (equivalent to picking '[+]' in the TUI)
 mytuis add
@@ -159,11 +185,21 @@ apps:
     path: '/usr/bin/nvim'
     created: '2026-06-21 10:42:11'
     last_used: '2026-06-21 12:15:03'
+  - name: 'lsl'
+    description: 'Listado largo'
+    path: '/usr/bin/ls'
+    args: '-lad'
+    created: '2026-06-21 10:45:00'
   - name: 'yt-dlp'
     description: 'Fork of youtube-dl with additional fixes'
     path: '/home/user/.local/bin/yt-dlp'
     created: '2026-06-21 10:45:00'
 ```
+
+The `args` field is optional. When present it is a single string that
+will be split on whitespace at launch time and forwarded to the
+executable after `path`. When absent the entry is launched with no
+arguments.
 
 If the catalogue is empty the file contains:
 
