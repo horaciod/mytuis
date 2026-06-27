@@ -1,0 +1,77 @@
+[package]
+# -----------------------------------------------------------------------------
+# Metadatos del paquete. El nombre `mytuis` es el del binario que vamos a
+# generar (también es el nombre con el que cargo publica el crate si decidís
+# subirlo a crates.io). `version` sigue semver: MAJOR.MINOR.PATCH.
+# -----------------------------------------------------------------------------
+name = "mytuis"
+version = "0.2.0"
+edition = "2021"
+# `rust-version` le indica a cargo la versión mínima de rustc que se necesita
+# para compilar este crate. Útil para que otros devs sepan qué toolchain usar.
+rust-version = "1.75"
+description = "Application and favorite-paths manager with a TUI"
+license = "MIT"
+
+# -----------------------------------------------------------------------------
+# Dependencias. Cada crate se trae de crates.io y se bloquea a una versión
+# mayor (semver). Los `features` activan funcionalidades opcionales de cada
+# crate; conviene leer la doc de cada uno para entender qué activan.
+# -----------------------------------------------------------------------------
+[dependencies]
+
+# Framework de TUI para Rust. Provee widgets (List, Table, Paragraph, Tabs…)
+# y un trait `ratatui::Frame` para dibujar en la terminal.
+ratatui = "0.29"
+
+# Backend de terminal que sabe hablar con la consola: poner la terminal en
+# "raw mode", ocultar el cursor, leer teclas, etc. Ratatui lo usa por debajo.
+crossterm = "0.28"
+
+# Parser de argumentos de línea de comando. Con `derive` escribimos structs
+# que describen la CLI y clap genera el parser + el --help automáticamente.
+clap = { version = "4", features = ["derive"] }
+
+# Serialización / deserialización. El `derive` nos permite usar
+# `#[derive(Serialize, Deserialize)]` en nuestros structs.
+serde = { version = "1", features = ["derive"] }
+
+# Soporte para YAML en serde. Permite leer/escribir nuestros archivos YAML
+# directamente desde/hacia los structs del modelo.
+serde_yaml = "0.9"
+
+# Manejo de fechas y horas. Lo usamos para los timestamps `created` y
+# `last_used` de cada app / favorito.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Manejo de errores. `thiserror` te ayuda a derivar `impl Error` para tus
+# propios enums de error; `anyhow` es para errores dinámicos en el call site.
+thiserror = "1"
+anyhow = "1"
+
+# Acceso a portapapeles del sistema. Usado para "copiar path al clipboard".
+arboard = "3"
+
+# Localiza directorios estándar del usuario (HOME, config, cache…). Acá solo
+# lo necesitamos para resolver `$HOME` de forma portable entre Linux/macOS.
+dirs = "5"
+
+# Buscar ejecutables en $PATH. Es lo que usaremos para resolver el comando
+# de una app cuando el usuario escribe `firefox` sin path absoluto.
+which = "6"
+
+# Detección de fin de línea multiplataforma. Solo lo necesitamos en Windows;
+# en Unix es un no-op.
+[target.'cfg(windows)'.dependencies]
+crossterm = "0.28"
+
+# -----------------------------------------------------------------------------
+# Perfil de compilación. `release-lto` aplica Link-Time Optimization y
+# `strip = true` elimina símbolos de debug del binario final, lo que vuelve
+# al ejecutable mucho más chico. Útil cuando vas a distribuir el binario.
+# -----------------------------------------------------------------------------
+[profile.release-lto]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
