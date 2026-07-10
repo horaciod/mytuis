@@ -1,24 +1,22 @@
 //! # Entrypoint de `mytuis`
 //!
 //! La función `main` es el punto de entrada que el sistema operativo
-//! llama cuando ejecutamos el binario. Acá hacemos tres cosas:
+//! llama cuando ejecutamos el binario. Acá hacemos:
 //!
-//! 1. Parsear los argumentos de la CLI con clap.
-//! 2. Migrar datos de la versión bash si hace falta (silencioso, salvo
-//!    que haya algo que reportar).
-//! 3. Despachar al handler correspondiente: TUI o subcomando CLI.
+//! 1. Detectar el idioma del usuario (de variables de entorno).
+//! 2. Migrar datos de la versión bash si hace falta.
+//! 3. Parsear los argumentos de la CLI con clap.
+//! 4. Despachar al handler correspondiente: TUI o subcomando CLI.
 //!
 //! ## Manejo de errores
 //!
 //! Rust no tiene "excepciones top-level": si algo falla, devolvemos un
-//! `Result` desde `main`. `std::process::exit(code)` se usa para
+//! `Result` desde `main`. `std::process::ExitCode` se usa para
 //! terminar el proceso con un código de salida específico. La
 //! convención es: `0` = éxito, `!= 0` = error.
 //!
-//! Acá usamos el truco de `anyhow::Result` para `main`, lo que nos
-//! permite usar `?` libremente sin preocuparnos por el tipo concreto
-//! del error. El `Display` del error (que ya implementamos en
-//! `error.rs` con `thiserror`) se imprime al stderr.
+//! Los mensajes de error al usuario se imprimen **localizados**
+//! usando `AppError::localized(lang)`.
 
 use std::process::ExitCode;
 
@@ -28,27 +26,37 @@ use clap::Parser;
 mod cli;
 mod config;
 mod error;
+mod lang;
 mod model;
 mod open;
 mod resolve;
 mod storage;
 mod tui;
 
-use cli::{AppsCmd, Cli, Command, PathsCmd};
+use cli::{AppsCmd, Cli, Command, PathsCmd, ToolsCmd};
 use error::{AppError, Result};
+use lang::Lang;
 
 /// `main` devuelve `ExitCode` para poder mapear nuestros errores a
 /// códigos de salida Unix. Esto es equivalente a `fn main() -> Result<...>`
 /// pero más explícito.
 fn main() -> ExitCode {
-    match run() {
+    // Detectamos el idioma ANTES de cualquier otra cosa. La detección
+    // es barata (lee 3 variables de entorno) y nos permite localizar
+    // incluso mensajes tempranos como el de la migración bash.
+    let lang = Lang::detect();
+
+    match run(lang) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
-            // Imprimimos el error al stderr (no a stdout, que es para
-            // datos que otros programas pueden consumir).
-            eprintln!("mytuis: {e:#}");
-            // Si fue un error nuestro, devolvemos 1. Si fue un error
-            // de I/O del sistema, también 1.
+            // Si el error es nuestro (AppError), lo localizamos. Si es
+            // un anyhow::Error (envoltura de algo externo), mostramos
+            // el mensaje tal cual.
+            if let Some(app_err) = e.downcast_ref::<AppError>() {
+                eprintln!("mytuis: {}", app_err.localized(lang));
+            } else {
+                eprintln!("mytuis: {e:#}");
+            }
             ExitCode::from(1)
         }
     }
@@ -58,7 +66,9 @@ fn main() -> ExitCode {
 /// porque queremos poder mezclar nuestro `AppError` con errores de
 /// librerías externas (clap, serde_yaml, etc.) sin andar haciendo
 /// conversiones a mano.
-fn run() -> anyhow::Result<()> {
+///
+/// Recibe `lang` para localizar todos los mensajes que imprime.
+fn run(lang: Lang) -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // 1. Migración silenciosa desde la versión bash.
     // ------------------------------------------------------------------
@@ -66,12 +76,9 @@ fn run() -> anyhow::Result<()> {
     // `~/.mytuis/apps.yaml`, lo importamos. Esto se hace **antes** de
     // parsear la CLI porque la CLI ya podría querer leer apps.
     if let Some(count) = storage::migrate_from_bash_if_needed()
-        .context("migrando datos de la versión bash")?
+        .context("migrating bash legacy data")?
     {
-        eprintln!(
-            "mytuis: migradas {count} app(s) desde ~/.mytuis.yaml \
-             (backup en ~/.mytuis.yaml.bak)"
-        );
+        eprintln!("{}", lang.migration_message(count));
     }
 
     // ------------------------------------------------------------------
@@ -94,19 +101,22 @@ fn run() -> anyhow::Result<()> {
     match cli.command {
         // Sin subcomando → abrir TUI.
         None => {
-            tui::run().context("error en la TUI")?;
+            tui::run(lang).context("TUI error")?;
         }
 
         // TUI explícito.
         Some(Command::Tui) => {
-            tui::run().context("error en la TUI")?;
+            tui::run(lang).context("TUI error")?;
         }
 
         // Apps.
-        Some(Command::Apps(cmd)) => handle_apps(cmd)?,
+        Some(Command::Apps(cmd)) => handle_apps(lang, cmd)?,
 
         // Paths (favoritos).
-        Some(Command::Paths(cmd)) => handle_paths(cmd)?,
+        Some(Command::Paths(cmd)) => handle_paths(lang, cmd)?,
+
+        // Tools (aplicaciones remotas / URLs).
+        Some(Command::Tools(cmd)) => handle_tools(lang, cmd)?,
     }
 
     Ok(())
@@ -125,7 +135,6 @@ fn run() -> anyhow::Result<()> {
 /// Si el primer argumento no es uno de estos aliases, devuelve el
 /// argv sin tocar (caso normal).
 fn rewrite_legacy_argv(argv: Vec<String>) -> Vec<String> {
-    // El argv siempre tiene al menos el nombre del binario en [0].
     if argv.len() < 2 {
         return argv;
     }
@@ -153,13 +162,13 @@ fn rewrite_legacy_argv(argv: Vec<String>) -> Vec<String> {
 //  Handlers de subcomandos APPS
 // ============================================================================
 
-fn handle_apps(cmd: AppsCmd) -> anyhow::Result<()> {
+fn handle_apps(lang: Lang, cmd: AppsCmd) -> anyhow::Result<()> {
     match cmd {
-        AppsCmd::List => cmd_apps_list()?,
+        AppsCmd::List => cmd_apps_list(lang)?,
         AppsCmd::Add { name, description, command } => {
-            cmd_apps_add(&name, &description, &command)?
+            cmd_apps_add(lang, &name, &description, &command)?
         }
-        AppsCmd::Remove { name, yes } => cmd_apps_remove(&name, yes)?,
+        AppsCmd::Remove { name, yes } => cmd_apps_remove(lang, &name, yes)?,
     }
     Ok(())
 }
@@ -168,21 +177,16 @@ fn handle_apps(cmd: AppsCmd) -> anyhow::Result<()> {
 ///
 /// Si stdout es una TTY, intenta colorear. Si no (pipe a `grep`, etc.),
 /// imprime texto plano tabulado para que sea fácil de procesar.
-fn cmd_apps_list() -> Result<()> {
+fn cmd_apps_list(lang: Lang) -> Result<()> {
     let apps = storage::load_apps()?;
 
     if apps.is_empty() {
-        if atty_stdout() {
-            println!("No hay aplicaciones registradas todavía.");
-        } else {
-            println!("No hay aplicaciones registradas todavía.");
-        }
+        println!("{}", lang.no_apps());
         return Ok(());
     }
 
     // Construimos filas tabuladas. Truncamos descripción y args a 40
-    // caracteres para mantener la tabla compacta (igual que la versión
-    // bash).
+    // caracteres para mantener la tabla compacta.
     let rows: Vec<String> = apps
         .iter()
         .map(|a| {
@@ -190,25 +194,23 @@ fn cmd_apps_list() -> Result<()> {
             let args = truncate(&a.args, 40);
             format!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                a.name,
-                desc,
-                a.path,
-                args,
-                a.created,
-                a.last_used,
+                a.name, desc, a.path, args, a.created, a.last_used,
             )
         })
         .collect();
 
     if atty_stdout() {
-        // TTY → tabla con borde. `comfy-table` no está en deps, así
-        // que hacemos nuestra propia versión minimalista con `|`.
-        print_table(&[
-            "Nombre", "Descripción", "Path", "Args", "Creado", "Último uso",
-        ], &rows);
+        // TTY → tabla con borde. Sin crate extra, hacemos nuestra
+        // propia versión minimalista con líneas.
+        print_table(
+            &lang.table_header_apps()
+                .split('\t')
+                .collect::<Vec<_>>(),
+            &rows,
+        );
     } else {
-        // Pipe → emitimos TSV (tab-separated values), fácil de grepear.
-        println!("Nombre\tDescripción\tPath\tArgs\tCreado\tÚltimo uso");
+        // Pipe → TSV.
+        println!("{}", lang.table_header_apps());
         for r in &rows {
             println!("{r}");
         }
@@ -217,7 +219,7 @@ fn cmd_apps_list() -> Result<()> {
 }
 
 /// `mytuis apps add <name> <desc> <command>` — agrega una app.
-fn cmd_apps_add(name: &str, description: &str, command: &str) -> Result<()> {
+fn cmd_apps_add(lang: Lang, name: &str, description: &str, command: &str) -> Result<()> {
     // 1. Resolver el comando a un path absoluto.
     let resolved = resolve::resolve_command(command);
     if !resolved.is_ok() {
@@ -236,16 +238,12 @@ fn cmd_apps_add(name: &str, description: &str, command: &str) -> Result<()> {
     apps.push(app);
     storage::save_apps(&apps)?;
 
-    if resolved.args.is_empty() {
-        println!("✔ Agregada '{name}' → {}", resolved.path);
-    } else {
-        println!("✔ Agregada '{name}' → {} {}", resolved.path, resolved.args);
-    }
+    println!("{}", lang.app_added(name, &resolved.path, &resolved.args));
     Ok(())
 }
 
 /// `mytuis apps remove <name>` — borra una app.
-fn cmd_apps_remove(name: &str, yes: bool) -> Result<()> {
+fn cmd_apps_remove(lang: Lang, name: &str, yes: bool) -> Result<()> {
     let mut apps = storage::load_apps()?;
 
     let pos = apps.iter().position(|a| a.name == name);
@@ -256,15 +254,15 @@ fn cmd_apps_remove(name: &str, yes: bool) -> Result<()> {
 
     // Pedir confirmación si estamos en TTY y no se pasó --yes.
     if !yes && atty_stdin() && atty_stdout() {
-        if !confirm(&format!("¿Borrar la app '{name}'?"))? {
-            println!("Cancelado.");
+        if !confirm(&lang.confirm_remove_app(name), lang)? {
+            println!("{}", lang.cancelled());
             return Ok(());
         }
     }
 
     apps.remove(pos);
     storage::save_apps(&apps)?;
-    println!("✔ Borrada '{name}'");
+    println!("{}", lang.app_removed(name));
     Ok(())
 }
 
@@ -272,23 +270,25 @@ fn cmd_apps_remove(name: &str, yes: bool) -> Result<()> {
 //  Handlers de subcomandos PATHS (favoritos)
 // ============================================================================
 
-fn handle_paths(cmd: PathsCmd) -> anyhow::Result<()> {
+fn handle_paths(lang: Lang, cmd: PathsCmd) -> anyhow::Result<()> {
     match cmd {
-        PathsCmd::List => cmd_paths_list()?,
+        PathsCmd::List => cmd_paths_list(lang)?,
         PathsCmd::Add { name, path, description } => {
-            cmd_paths_add(&name, &path, description.as_deref().unwrap_or(""))?
+            cmd_paths_add(lang, &name, &path, description.as_deref().unwrap_or(""))?
         }
-        PathsCmd::Remove { name, yes } => cmd_paths_remove(&name, yes)?,
+        PathsCmd::Remove { name, yes } => cmd_paths_remove(lang, &name, yes)?,
         PathsCmd::Get { name } => cmd_paths_get(&name)?,
+        PathsCmd::Go { name } => cmd_paths_go(lang, &name)?,
+        PathsCmd::Cd { name } => cmd_paths_cd(lang, &name)?,
     }
     Ok(())
 }
 
 /// `mytuis paths list` — lista los favoritos.
-fn cmd_paths_list() -> Result<()> {
+fn cmd_paths_list(lang: Lang) -> Result<()> {
     let favs = storage::load_favs()?;
     if favs.is_empty() {
-        println!("No hay rutas favoritas todavía.");
+        println!("{}", lang.no_favs());
         return Ok(());
     }
 
@@ -296,20 +296,19 @@ fn cmd_paths_list() -> Result<()> {
         .iter()
         .map(|f| {
             let desc = truncate(&f.description, 40);
-            format!(
-                "{}\t{}\t{}\t{}\t{}",
-                f.name, desc, f.path, f.created, f.last_used,
-            )
+            format!("{}\t{}\t{}\t{}\t{}", f.name, desc, f.path, f.created, f.last_used)
         })
         .collect();
 
     if atty_stdout() {
         print_table(
-            &["Nombre", "Descripción", "Path", "Creado", "Último uso"],
+            &lang.table_header_favs()
+                .split('\t')
+                .collect::<Vec<_>>(),
             &rows,
         );
     } else {
-        println!("Nombre\tDescripción\tPath\tCreado\tÚltimo uso");
+        println!("{}", lang.table_header_favs());
         for r in &rows {
             println!("{r}");
         }
@@ -318,17 +317,12 @@ fn cmd_paths_list() -> Result<()> {
 }
 
 /// `mytuis paths add <name> <path> [-d desc]` — agrega un favorito.
-fn cmd_paths_add(name: &str, path: &str, description: &str) -> Result<()> {
-    // 1. Resolver y validar el path.
+fn cmd_paths_add(lang: Lang, name: &str, path: &str, description: &str) -> Result<()> {
     let resolved = resolve::resolve_favorite_dir(path)?;
-
-    // 2. Verificar duplicado.
     let mut favs = storage::load_favs()?;
     if favs.iter().any(|f| f.name == name) {
         return Err(AppError::Duplicate(name.to_string()));
     }
-
-    // 3. Guardar.
     let now = model::now_string();
     let fav = model::FavoritePath::new(
         name,
@@ -338,13 +332,12 @@ fn cmd_paths_add(name: &str, path: &str, description: &str) -> Result<()> {
     );
     favs.push(fav);
     storage::save_favs(&favs)?;
-
-    println!("✔ Agregado favorito '{name}' → {}", resolved.display());
+    println!("{}", lang.fav_added(name, &resolved.to_string_lossy()));
     Ok(())
 }
 
 /// `mytuis paths remove <name>` — borra un favorito.
-fn cmd_paths_remove(name: &str, yes: bool) -> Result<()> {
+fn cmd_paths_remove(lang: Lang, name: &str, yes: bool) -> Result<()> {
     let mut favs = storage::load_favs()?;
     let pos = favs.iter().position(|f| f.name == name);
     let pos = match pos {
@@ -353,33 +346,259 @@ fn cmd_paths_remove(name: &str, yes: bool) -> Result<()> {
     };
 
     if !yes && atty_stdin() && atty_stdout() {
-        if !confirm(&format!("¿Borrar el favorito '{name}'?"))? {
-            println!("Cancelado.");
+        if !confirm(&lang.confirm_remove_fav(name), lang)? {
+            println!("{}", lang.cancelled());
             return Ok(());
         }
     }
 
     favs.remove(pos);
     storage::save_favs(&favs)?;
-    println!("✔ Borrado '{name}'");
+    println!("{}", lang.fav_removed(name));
     Ok(())
 }
 
 /// `mytuis paths get <name>` — imprime el path al stdout. Pensado para
 /// `cd "$(mytuis paths get mi-proyecto)"`.
+///
+/// No recibe `lang` porque el output (el path) es siempre literal —
+/// no se traduce. Si el favorito no existe, devolvemos `AppError::NotFound`
+/// que será localizado en `main`.
 fn cmd_paths_get(name: &str) -> Result<()> {
     let favs = storage::load_favs()?;
     match favs.iter().find(|f| f.name == name) {
         Some(f) => {
-            // Imprimimos sin newline final extra para que sea más
-            // fácil de capturar, pero en realidad `println!` siempre
-            // pone uno. Si el usuario quiere sin newline, debería
-            // usar `tr -d '\n'` o redireccionar.
             println!("{}", f.path);
             Ok(())
         }
         None => Err(AppError::NotFound(name.to_string())),
     }
+}
+
+/// `mytuis paths go <name>` — equivalente CLI de la meta entry
+/// `[↵] Open here` de la TUI. Abre una terminal en el directorio
+/// del favorito y sale.
+///
+/// Útil para keybindings del shell:
+///
+/// ```bash
+/// # En .bashrc:
+/// gocd() { mytuis paths go "$1"; }
+/// ```
+///
+/// Pasos:
+/// 1. Carga los favoritos y busca el nombre.
+/// 2. Valida que el path todavía exista como directorio.
+/// 3. Actualiza `last_used`.
+/// 4. Lanza la terminal (vía `open::open_terminal_in`).
+/// 5. Sale silenciosamente (exit 0). Los errores se reportan al
+///    stderr vía `AppError::localized(lang)`.
+fn cmd_paths_go(lang: Lang, name: &str) -> Result<()> {
+    let mut favs = storage::load_favs()?;
+    let fav = favs
+        .iter()
+        .find(|f| f.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(name.to_string()))?;
+
+    // Resolvemos y validamos el path. Esto también expande `~` por
+    // si el usuario editó el YAML a mano.
+    let resolved = resolve::resolve_favorite_dir(&fav.path)?;
+
+    // Actualizamos `last_used` antes de abrir la terminal (por si
+    // falla el spawn, al menos queda registrado).
+    let now = model::now_string();
+    if let Some(f) = favs.iter_mut().find(|f| f.name == name) {
+        f.last_used = now.clone();
+        f.path = resolved.to_string_lossy().to_string();
+    }
+    storage::save_favs(&favs)?;
+
+    // Mensaje breve al stderr (la stdout queda limpia para pipes).
+    eprintln!("{}", lang.msg_opened_and_quitting(&resolved.to_string_lossy()));
+
+    // Abrimos la terminal. Si no hay emulador, devolvemos
+    // AppError::NoTerminal que será localizado en main.
+    open::open_terminal_in(&resolved)?;
+
+    Ok(())
+}
+
+/// `mytuis paths cd <name>` — equivalente CLI de la tecla `c` de la
+/// TUI: emite `cd <path>` al descriptor de archivo 3 (side channel
+/// estándar) y sale. NO abre una terminal nueva.
+///
+/// A diferencia de `paths go`, este subcomando está pensado para
+/// integrarse en un wrapper del shell:
+///
+/// ```bash
+/// # En .bashrc / .zshrc:
+/// mytuis() {
+///     local out
+///     out=$(command mytuis "$@" 3>&1 1>&2 2>&3)
+///     [ -n "$out" ] && eval "$out"
+/// }
+/// ```
+///
+/// Pasos:
+/// 1. Carga los favoritos y busca el nombre.
+/// 2. Valida y resuelve el path.
+/// 3. Emite `cd <path>\n` al fd 3 (vía `open::emit_cd_to_fd3`).
+/// 4. Sale silenciosamente (exit 0) si la emisión fue exitosa.
+///
+/// Si fd 3 no está abierto (no hay wrapper configurado), devuelve
+/// error con el snippet del wrapper. La stdout queda limpia para
+/// que el `$(...)` del wrapper solo vea el `cd <path>`.
+fn cmd_paths_cd(lang: Lang, name: &str) -> Result<()> {
+    let favs = storage::load_favs()?;
+    let fav = favs
+        .iter()
+        .find(|f| f.name == name)
+        .ok_or_else(|| AppError::NotFound(name.to_string()))?;
+
+    // Resolvemos para expandir `~` y validar que el dir exista.
+    let resolved = resolve::resolve_favorite_dir(&fav.path)?;
+
+    // Emitimos al fd 3. Esto puede fallar si el shell no configuró
+    // el wrapper; en ese caso, dejamos que el error suba con un
+    // mensaje localizado.
+    open::emit_cd_to_fd3(&resolved)?;
+
+    // Mensaje de despedida al stderr (NO stdout — esa va al fd 3
+    // para que el wrapper la evalúe, y no queremos contaminarla).
+    eprintln!("{}", lang.msg_cd_done_flash(&resolved.to_string_lossy()));
+
+    Ok(())
+}
+
+// ============================================================================
+//  Handlers de subcomandos TOOLS (aplicaciones remotas)
+// ============================================================================
+
+fn handle_tools(lang: Lang, cmd: ToolsCmd) -> anyhow::Result<()> {
+    match cmd {
+        ToolsCmd::List => cmd_tools_list(lang)?,
+        ToolsCmd::Add {
+            name,
+            description,
+            url,
+        } => cmd_tools_add(lang, &name, &description, &url)?,
+        ToolsCmd::Remove { name, yes } => cmd_tools_remove(lang, &name, yes)?,
+        ToolsCmd::Run { name } => cmd_tools_run(lang, &name)?,
+    }
+    Ok(())
+}
+
+/// `mytuis tools list` — imprime la tabla de tools.
+fn cmd_tools_list(lang: Lang) -> Result<()> {
+    let tools = storage::load_tools()?;
+
+    if tools.is_empty() {
+        println!("{}", lang.no_tools());
+        return Ok(());
+    }
+
+    let rows: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            let desc = truncate(&t.description, 40);
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                t.name, desc, t.url, t.created, t.last_used,
+            )
+        })
+        .collect();
+
+    if atty_stdout() {
+        print_table(
+            &lang.table_header_tools()
+                .split('\t')
+                .collect::<Vec<_>>(),
+            &rows,
+        );
+    } else {
+        println!("{}", lang.table_header_tools());
+        for r in &rows {
+            println!("{r}");
+        }
+    }
+    Ok(())
+}
+
+/// `mytuis tools add <name> <desc> <url>` — agrega un tool.
+///
+/// Validamos la URL con `resolve::resolve_tool_url` (esquema http/https
+/// y host no vacío) **antes** de tocar storage, así no se queda un
+/// archivo inconsistente si la URL es inválida.
+fn cmd_tools_add(lang: Lang, name: &str, description: &str, url: &str) -> Result<()> {
+    // 1. Validar URL (devuelve String normalizada).
+    let url = resolve::resolve_tool_url(url)?;
+
+    // 2. Verificar duplicado.
+    let mut tools = storage::load_tools()?;
+    if tools.iter().any(|t| t.name == name) {
+        return Err(AppError::Duplicate(name.to_string()));
+    }
+
+    // 3. Construir el tool y guardarlo.
+    let now = model::now_string();
+    let tool = model::Tool::new(name, description, &url, now);
+    tools.push(tool);
+    storage::save_tools(&tools)?;
+
+    println!("{}", lang.tool_added(name, &url));
+    Ok(())
+}
+
+/// `mytuis tools remove <name>` — borra un tool.
+fn cmd_tools_remove(lang: Lang, name: &str, yes: bool) -> Result<()> {
+    let mut tools = storage::load_tools()?;
+
+    let pos = tools.iter().position(|t| t.name == name);
+    let pos = match pos {
+        Some(p) => p,
+        None => return Err(AppError::NotFound(name.to_string())),
+    };
+
+    if !yes && atty_stdin() && atty_stdout() {
+        if !confirm(&lang.confirm_remove_tool(name), lang)? {
+            println!("{}", lang.cancelled());
+            return Ok(());
+        }
+    }
+
+    tools.remove(pos);
+    storage::save_tools(&tools)?;
+    println!("{}", lang.tool_removed(name));
+    Ok(())
+}
+
+/// `mytuis tools run <name>` — abre la URL del tool con el opener del
+/// sistema y actualiza `last_used`. Equivalente a la acción Run de la
+/// TUI.
+fn cmd_tools_run(lang: Lang, name: &str) -> Result<()> {
+    let mut tools = storage::load_tools()?;
+    let tool = tools
+        .iter()
+        .find(|t| t.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(name.to_string()))?;
+
+    // Validamos la URL antes de abrir (por si el usuario editó el YAML
+    // a mano). Si está malformada, fallamos sin tocar `last_used`.
+    let url = resolve::resolve_tool_url(&tool.url)?;
+
+    // Actualizamos `last_used` antes de abrir (si falla el opener, al
+    // menos queda registrado).
+    let now = model::now_string();
+    if let Some(t) = tools.iter_mut().find(|t| t.name == name) {
+        t.last_used = now;
+    }
+    storage::save_tools(&tools)?;
+
+    eprintln!("{}", lang.msg_tool_opened_flash(name));
+    open::open_url(&url)?;
+    Ok(())
 }
 
 // ============================================================================
@@ -397,8 +616,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Detecta si stdout es una terminal (true → TTY). Usamos `isatty` del
-/// crate `std` directamente, sin crate externo, para no agregar deps.
+/// Detecta si stdout es una terminal (true → TTY).
 fn atty_stdout() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
@@ -408,11 +626,9 @@ fn atty_stdin() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
-/// Imprime una tabla minimalista. Anchos calculados a partir del
-/// contenido. No es la tabla más linda del mundo pero se ve decente y
-/// no requiere dependencias.
+/// Imprime una tabla minimalista con líneas. Anchos calculados a
+/// partir del contenido.
 fn print_table(headers: &[&str], rows: &[String]) {
-    // Calcular ancho de cada columna.
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in rows {
         for (i, cell) in row.split('\t').enumerate() {
@@ -423,7 +639,6 @@ fn print_table(headers: &[&str], rows: &[String]) {
         }
     }
 
-    // Helper para formatear una fila.
     let format_row = |cells: &[&str]| {
         cells
             .iter()
@@ -436,16 +651,10 @@ fn print_table(headers: &[&str], rows: &[String]) {
             .join("  ")
     };
 
-    // Borde superior.
-    let total_width: usize = widths.iter().sum::<usize>()
-        + 2 * (widths.len().saturating_sub(1));
+    let total_width: usize = widths.iter().sum::<usize>() + 2 * (widths.len().saturating_sub(1));
     println!("{}", "─".repeat(total_width));
-
-    // Header.
     println!("{}", format_row(headers));
     println!("{}", "─".repeat(total_width));
-
-    // Filas.
     for row in rows {
         let cells: Vec<&str> = row.split('\t').collect();
         println!("{}", format_row(&cells));
@@ -453,23 +662,23 @@ fn print_table(headers: &[&str], rows: &[String]) {
     println!("{}", "─".repeat(total_width));
 }
 
-/// Pregunta de sí/no por stdin. Lee una línea y considera "s", "S",
-/// "si", "yes", "y" como sí; cualquier otra cosa como no.
-///
-/// Devuelve `true` si el usuario confirmó, `false` si dijo que no.
-/// Si no se puede leer stdin (pipe), devuelve `false` por seguridad.
-fn confirm(prompt: &str) -> Result<bool> {
+/// Pregunta de sí/no por stdin. Las respuestas válidas se eligen según
+/// el idioma: en inglés `y`/`yes`; en español `s`/`si`.
+fn confirm(prompt: &str, lang: Lang) -> Result<bool> {
     use std::io::Write;
-    print!("{prompt} [s/N] ");
+    print!("{prompt}");
     std::io::stdout().flush().ok();
     let mut buf = String::new();
-    let n = std::io::stdin().read_line(&mut buf).map_err(|e| {
-        AppError::other(format!("leyendo stdin: {e}"))
-    })?;
+    let n = std::io::stdin()
+        .read_line(&mut buf)
+        .map_err(|e| AppError::other(format!("reading stdin: {e}")))?;
     if n == 0 {
-        // EOF → no.
         return Ok(false);
     }
     let ans = buf.trim().to_lowercase();
-    Ok(matches!(ans.as_str(), "s" | "si" | "y" | "yes"))
+    let yes_set: &[&str] = match lang {
+        Lang::En => &["y", "yes"],
+        Lang::Es => &["s", "si", "y", "yes"],
+    };
+    Ok(yes_set.contains(&ans.as_str()))
 }

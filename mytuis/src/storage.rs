@@ -38,9 +38,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{apps_file, ensure_data_dir, favs_file, legacy_bash_file};
+use crate::config::{apps_file, ensure_data_dir, favs_file, legacy_bash_file, tools_file};
 use crate::error::{AppError, Result};
-use crate::model::{App, AppsFile, FavoritePath, FavoritesFile};
+use crate::model::{App, AppsFile, FavoritePath, FavoritesFile, Tool, ToolsFile};
 
 // ============================================================================
 //  APPS
@@ -115,6 +115,45 @@ pub fn save_favs(favs: &[FavoritePath]) -> Result<()> {
     let path = favs_file();
     let payload = FavoritesFile {
         favorites: favs.to_vec(),
+    };
+    let yaml = serde_yaml::to_string(&payload).map_err(|source| AppError::Yaml {
+        path: path.clone(),
+        source,
+    })?;
+    atomic_write(&path, &yaml)
+}
+
+// ============================================================================
+//  TOOLS (aplicaciones remotas / URLs)
+// ============================================================================
+
+/// Lee todos los tools del archivo. Mismas reglas que `load_apps` y
+/// `load_favs`: si el archivo no existe, devuelve vector vacío.
+pub fn load_tools() -> Result<Vec<Tool>> {
+    let path = tools_file();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|source| AppError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed: ToolsFile = serde_yaml::from_str(&text).map_err(|source| AppError::Yaml {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(parsed.tools)
+}
+
+/// Guarda todos los tools (escritura atómica).
+pub fn save_tools(tools: &[Tool]) -> Result<()> {
+    ensure_data_dir()?;
+    let path = tools_file();
+    let payload = ToolsFile {
+        tools: tools.to_vec(),
     };
     let yaml = serde_yaml::to_string(&payload).map_err(|source| AppError::Yaml {
         path: path.clone(),
@@ -276,6 +315,28 @@ mod tests {
         assert!(!file.with_extension("tmp").exists());
     }
 
+    #[test]
+    fn tools_roundtrip_vacio() {
+        let dir = tmp_dir();
+        let file = dir.join("tools.yaml");
+        save_tools_at(&file, &[]).unwrap();
+        let loaded = load_tools_at(&file).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn tools_roundtrip_con_datos() {
+        let dir = tmp_dir();
+        let file = dir.join("tools.yaml");
+        let tools = vec![
+            Tool::new("grafana", "Monitoring", "https://grafana.example.com", "2026-07-10 12:00:00"),
+            Tool::new("hub", "Jupyter", "https://hub.example.com", "2026-07-10 12:00:01"),
+        ];
+        save_tools_at(&file, &tools).unwrap();
+        let loaded = load_tools_at(&file).unwrap();
+        assert_eq!(loaded, tools);
+    }
+
     /// Versiones de load/save parametrizadas para tests (no usan las
     /// rutas globales). Mantienen la misma lógica que las públicas
     /// pero reciben el path como argumento.
@@ -308,5 +369,37 @@ mod tests {
                 source,
             })?;
         Ok(parsed.apps)
+    }
+
+    /// Versión parametrizada de `save_tools` para tests.
+    fn save_tools_at(path: &Path, tools: &[Tool]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let payload = ToolsFile {
+            tools: tools.to_vec(),
+        };
+        let yaml = serde_yaml::to_string(&payload)
+            .map_err(|source| AppError::Yaml { path: path.to_path_buf(), source })?;
+        atomic_write(path, &yaml)
+    }
+
+    fn load_tools_at(path: &Path) -> Result<Vec<Tool>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = fs::read_to_string(path).map_err(|source| AppError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let parsed: ToolsFile =
+            serde_yaml::from_str(&text).map_err(|source| AppError::Yaml {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Ok(parsed.tools)
     }
 }

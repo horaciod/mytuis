@@ -1,11 +1,12 @@
-/datos/tui/mytuis/target/debug/deps/mytuis-9b08d65c5789e681.d: src/main.rs src/cli.rs src/config.rs src/error.rs src/model.rs src/open.rs src/resolve.rs src/storage.rs src/tui/mod.rs src/tui/form.rs src/tui/list_view.rs src/tui/theme.rs
+/datos/tui/mytuis/target/debug/deps/mytuis-9b08d65c5789e681.d: src/main.rs src/cli.rs src/config.rs src/error.rs src/lang.rs src/model.rs src/open.rs src/resolve.rs src/storage.rs src/tui/mod.rs src/tui/form.rs src/tui/list_view.rs src/tui/theme.rs
 
-/datos/tui/mytuis/target/debug/deps/mytuis-9b08d65c5789e681: src/main.rs src/cli.rs src/config.rs src/error.rs src/model.rs src/open.rs src/resolve.rs src/storage.rs src/tui/mod.rs src/tui/form.rs src/tui/list_view.rs src/tui/theme.rs
+/datos/tui/mytuis/target/debug/deps/mytuis-9b08d65c5789e681: src/main.rs src/cli.rs src/config.rs src/error.rs src/lang.rs src/model.rs src/open.rs src/resolve.rs src/storage.rs src/tui/mod.rs src/tui/form.rs src/tui/list_view.rs src/tui/theme.rs
 
 src/main.rs:
 src/cli.rs:
 src/config.rs:
 src/error.rs:
+src/lang.rs:
 src/model.rs:
 src/open.rs:
 src/resolve.rs:

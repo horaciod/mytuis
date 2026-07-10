@@ -135,6 +135,59 @@ pub fn resolve_favorite_dir(input: &str) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
 }
 
+/// Resuelve/valida la URL de un tool. Acepta solo URLs http(s) con una
+/// parte de host no vacía. Devuelve la URL normalizada (trim) si está
+/// OK, o un `AppError::InvalidUrl` con el input original.
+///
+/// Decisiones de validación:
+/// - Rechaza vacío.
+/// - Solo `http://` y `https://` (los demás esquemas — `file:`, `ssh:`
+///   — son cosas distintas y no aplican a este caso).
+/// - Debe haber una parte de "autoridad" no vacía (ej. `example.com`).
+///
+/// No parseamos con `url::Url` para no agregar una dependencia: hacemos
+/// el chequeo a mano, suficiente para los casos típicos.
+pub fn resolve_tool_url(input: &str) -> Result<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(AppError::InvalidUrl(String::new()));
+    }
+
+    // Buscamos el esquema al principio: `[a-zA-Z][a-zA-Z0-9+.-]*:`.
+    // Si no hay `:` en posición razonable, no es una URL absoluta.
+    let (scheme, rest) = match input.find(':') {
+        // Encontramos `:`. Lo que va antes es el esquema candidato.
+        Some(idx) if idx > 0 => (&input[..idx], &input[idx + 1..]),
+        // `:` en la posición 0 (raro) o no hay `:` → no es URL válida.
+        _ => return Err(AppError::InvalidUrl(input.to_string())),
+    };
+
+    let scheme_lower = scheme.to_lowercase();
+    if scheme_lower != "http" && scheme_lower != "https" {
+        return Err(AppError::InvalidUrl(input.to_string()));
+    }
+
+    // Después de `http(s):` tiene que venir `//` (URLs absolutas con
+    // autoridad). Si no, no es una URL que sepamos abrir.
+    let rest = rest.trim_start();
+    if !rest.starts_with("//") {
+        return Err(AppError::InvalidUrl(input.to_string()));
+    }
+
+    // El host es lo que viene después de `//` hasta el próximo `/`,
+    // `?`, `#` o fin de string. Tiene que ser no vacío.
+    let after_slashes = &rest[2..];
+    let host_end = after_slashes
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_slashes.len());
+    let host = &after_slashes[..host_end];
+    if host.is_empty() {
+        return Err(AppError::InvalidUrl(input.to_string()));
+    }
+
+    Ok(input.to_string())
+}
+
 /// Helper interno: expande `~` o `~/foo` al principio de un path.
 ///
 /// Si `$HOME` no está definido, devuelve el input sin tocar (mejor
@@ -229,5 +282,41 @@ mod tests {
         let r = resolve_command("/bin/sh");
         assert!(r.is_ok(), "r = {:?}", r);
         assert_eq!(r.path, "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_tool_url_acepta_http_y_https() {
+        let r = resolve_tool_url("https://grafana.example.com/d/abc").unwrap();
+        assert_eq!(r, "https://grafana.example.com/d/abc");
+        let r = resolve_tool_url("http://example.com").unwrap();
+        assert_eq!(r, "http://example.com");
+    }
+
+    #[test]
+    fn resolve_tool_url_normaliza_espacios_extremos() {
+        let r = resolve_tool_url("  https://example.com  ").unwrap();
+        assert_eq!(r, "https://example.com");
+    }
+
+    #[test]
+    fn resolve_tool_url_rechaza_vacia() {
+        assert!(resolve_tool_url("").is_err());
+        assert!(resolve_tool_url("   ").is_err());
+    }
+
+    #[test]
+    fn resolve_tool_url_rechaza_esquema_invalido() {
+        // file://, ssh://, sin esquema, etc.
+        assert!(resolve_tool_url("file:///etc/passwd").is_err());
+        assert!(resolve_tool_url("ssh://user@host").is_err());
+        assert!(resolve_tool_url("example.com").is_err());
+        assert!(resolve_tool_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn resolve_tool_url_rechaza_host_vacio() {
+        // `https://` solo, sin host.
+        assert!(resolve_tool_url("https://").is_err());
+        assert!(resolve_tool_url("https:///path").is_err());
     }
 }

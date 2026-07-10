@@ -66,6 +66,11 @@ pub enum Command {
     /// Gestiona las rutas favoritas.
     #[command(subcommand)]
     Paths(PathsCmd),
+
+    /// Gestiona las aplicaciones remotas (URLs que se abren en el
+    /// navegador/opener del sistema).
+    #[command(subcommand)]
+    Tools(ToolsCmd),
 }
 
 /// Subcomandos para `apps`.
@@ -141,6 +146,91 @@ pub enum PathsCmd {
     ///   cdfav() { cd "$(mytuis paths get "$1")"; }
     Get {
         /// Nombre del favorito a buscar.
+        name: String,
+    },
+
+    /// Abre una terminal en el directorio del favorito y sale de
+    /// mytuis. Equivalente a la meta entry `[↵] Open here` de la TUI,
+    /// pero sin abrir la interfaz — útil para integrar en scripts
+    /// y keybindings del shell.
+    ///
+    /// Ejemplo:
+    ///   mytuis paths go pepe    # abre terminal en /datos/pepe
+    Go {
+        /// Nombre del favorito a abrir.
+        name: String,
+    },
+
+    /// Cambia al directorio del favorito y sale, **sin abrir una
+    /// terminal nueva**. A diferencia de `go`, que spawnea otra
+    /// terminal, `cd` emite un comando `cd <path>` al descriptor de
+    /// archivo 3 (side channel estándar, igual que `broot`/`zoxide`).
+    ///
+    /// Esto requiere que el shell padre tenga un wrapper configurado:
+    ///
+    /// ```bash
+    /// mytuis() {
+    ///     local out
+    ///     out=$(command mytuis "$@" 3>&1 1>&2 2>&3)
+    ///     [ -n "$out" ] && eval "$out"
+    /// }
+    /// ```
+    ///
+    /// Útil para scripts y keybindings donde NO se quiere otra
+    /// terminal. Ejemplo:
+    ///
+    ///   mytuis paths cd pepe    # el shell hace `cd /datos/pepe`
+    Cd {
+        /// Nombre del favorito al que cambiar.
+        name: String,
+    },
+}
+
+/// Subcomandos para `tools` (aplicaciones remotas / URLs).
+///
+/// El alcance es más chico que el de `paths` (no hay un equivalente de
+/// `go` / `cd` local — abrir la URL es siempre con el opener del SO).
+#[derive(Debug, Subcommand)]
+pub enum ToolsCmd {
+    /// Lista todos los tools registrados.
+    #[command(alias = "ls")]
+    List,
+
+    /// Agrega un tool. La URL se valida (http/https + host no vacío).
+    ///
+    /// Ejemplos:
+    ///   mytuis tools add grafana "Monitoring" https://grafana.example.com
+    ///   mytuis tools add hub "Jupyter" https://hub.example.com
+    Add {
+        /// Nombre único (la "key") del tool.
+        name: String,
+
+        /// Descripción libre.
+        description: String,
+
+        /// URL absoluta (http:// o https://).
+        url: String,
+    },
+
+    /// Borra un tool por nombre.
+    #[command(alias = "rm", alias = "del")]
+    Remove {
+        /// Nombre del tool a borrar.
+        name: String,
+
+        /// No pedir confirmación (útil para scripts).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Abre la URL del tool en el navegador/opener del sistema y
+    /// actualiza `last_used`. Equivalente a la acción "Run" de la TUI.
+    ///
+    /// Ejemplo:
+    ///   mytuis tools run grafana    # abre https://grafana.example.com
+    #[command(alias = "open")]
+    Run {
+        /// Nombre del tool a abrir.
         name: String,
     },
 }

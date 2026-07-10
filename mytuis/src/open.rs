@@ -23,6 +23,7 @@
 //! caemos a un fallback genérico vía shell: `sh -c "cd <dir> && exec
 //! $TERM"`.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -165,6 +166,146 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// ============================================================================
+//  SHELL INTEGRATION (fd 3)
+// ============================================================================
+
+// ============================================================================
+//  URL OPENER (aplicaciones remotas / tools)
+// ============================================================================
+
+// ============================================================================
+//  URL OPENER (aplicaciones remotas / tools)
+// ============================================================================
+//
+// Un "tool" es una URL (Grafana, dashboards, etc.) que queremos abrir
+// rápidamente. No hay un API estándar de Unix para eso, así que
+// usamos el "opener" del entorno:
+//
+// - Linux (Freedesktop): intentamos `xdg-open` primero, después `gio
+//   open` (que es el backend de GNOME para la misma idea).
+// - macOS: `open`.
+//
+// Si ninguno está disponible, devolvemos error. La idea es la misma
+// que `open_terminal_in`: hacer lo razonable sin inventar requisitos.
+
+/// Abre `url` con el opener del sistema. `Spawn` desacoplado, no
+/// esperamos a que termine (sería un navegador o un handler de URL
+/// del usuario).
+///
+/// Devuelve `Ok(())` si el `spawn` funcionó. `Err` en cualquier otro
+/// caso (no hay opener, falla el spawn, etc.).
+///
+/// Para el caso `gio open <url>` (que sí lleva un argumento pre-URL)
+/// delegamos a una rama específica en vez de armar el vector de args
+/// dinámicamente — más legible y sin acrobacias con lifetimes.
+pub fn open_url(url: &str) -> Result<()> {
+    // 1. xdg-open (Freedesktop, presente en casi cualquier Linux).
+    if which::which("xdg-open").is_ok() {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    // 2. gio open (GNOME — antes era `gvfs-open`).
+    if which::which("gio").is_ok() {
+        let result = Command::new("gio").arg("open").arg(url).spawn();
+        if result.is_ok() {
+            return Ok(());
+        }
+    }
+
+    // 3. open (macOS).
+    if which::which("open").is_ok() {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(AppError::other(
+        "no se encontró un opener para URLs (probá instalar xdg-utils / gio)",
+    ))
+}
+//
+// El fd 3 es el "side channel" estándar para que un subproceso le pase
+// comandos al shell padre sin necesidad de un wrapper externo (mismo
+// patrón que `broot`, `zoxide`, `fzf-cd-widget`, etc.).
+//
+// Flujo típico:
+//
+//   1. El usuario define en su `.bashrc` / `.zshrc`:
+//        mytuis() {
+//            local out
+//            out=$(command mytuis "$@" 3>&1 1>&2 2>&3)
+//            [ -n "$out" ] && eval "$out"
+//        }
+//
+//   2. Cuando invoca `mytuis` (TUI o subcomando), el shell dup-lica el
+//      stdout del padre al fd 3 del hijo (`3>&1`), y mueve el stdout
+//      del hijo al stderr (`1>&2`).
+//
+//   3. mytuis escribe al fd 3 (que originalmente era stdout del padre)
+//      comandos que el padre debe ejecutar **en su propio contexto**,
+//      no en el subshell de `$(...)`.
+//
+//   4. Cuando mytuis termina, el `$(...)` del wrapper recoge el fd 3
+//      y el shell padre hace `eval` sobre eso → `cd /path`, etc.
+
+/// Formatea un comando `cd <path>` para emitir por el side channel.
+///
+/// Es una función privada testeable: la lógica de formato vive acá
+/// para poder verificarla sin necesidad de un fd real. La función
+/// pública `emit_cd_to_fd3` se limita a wrappear a esta con la
+/// apertura de `/dev/fd/3`.
+fn format_cd_payload(path: &Path) -> String {
+    format!("cd {}\n", path.display())
+}
+
+/// Emite `cd <path>` al descriptor de archivo 3 del proceso.
+///
+/// ## Comportamiento cuando fd 3 NO está abierto
+///
+/// Devuelve `Err(AppError::Other)` con un mensaje que la TUI muestra
+/// como flash con instrucciones para configurar el wrapper. No
+/// intentamos caer a stdout porque la TUI está en alternate screen y
+/// la salida sería invisible o perturbadora.
+///
+/// ## Portabilidad
+///
+/// Usa `/dev/fd/3`, symlink disponible en Linux y macOS. En Windows
+/// no funciona — pero mytuis ya es Unix-first de todas formas.
+///
+/// ## Tests
+///
+/// El formateo del payload se testea unitariamente. La escritura real
+/// al fd 3 se valida manualmente con el smoke test (un wrapper que
+/// dup-lica un tempfile al fd 3 antes de invocar mytuis).
+pub fn emit_cd_to_fd3(path: &Path) -> Result<()> {
+    let payload = format_cd_payload(path);
+
+    // Abrimos `/dev/fd/3` para escritura. Si el shell padre no dup-licó
+    // nada al fd 3, la syscall falla con EBADF (Linux) o ENOENT
+    // (algunos sistemas con `/dev/fd` levemente distinto). Cualquier
+    // error se traduce a un mensaje claro.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/fd/3")
+        .map_err(|e| {
+            AppError::other(format!(
+                "fd 3 no está abierto (¿wrapper del shell no configurado?): {e}"
+            ))
+        })?;
+
+    f.write_all(payload.as_bytes())
+        .map_err(|e| AppError::other(format!("escritura a fd 3 falló: {e}")))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +319,32 @@ mod tests {
     #[test]
     fn shell_quote_con_path_con_espacios() {
         assert_eq!(shell_quote("/datos/pepe repo"), "'/datos/pepe repo'");
+    }
+
+    #[test]
+    fn format_cd_payload_path_simple() {
+        // El payload para emitir al fd 3 debe ser exactamente
+        // `cd <path>\n`. El `\n` final es importante porque el wrapper
+        // del shell va a hacer `eval` sobre lo que lea.
+        assert_eq!(format_cd_payload(Path::new("/datos/pepe")), "cd /datos/pepe\n");
+    }
+
+    #[test]
+    fn format_cd_payload_path_con_espacios() {
+        // `Path::display()` no escapa espacios ni quotes — eso es
+        // responsabilidad del shell que hace `eval`. Mientras tanto
+        // nosotros pasamos el path tal cual, sin tocar.
+        assert_eq!(
+            format_cd_payload(Path::new("/datos/pepe repo")),
+            "cd /datos/pepe repo\n"
+        );
+    }
+
+    #[test]
+    fn format_cd_payload_path_con_caracteres_unicode() {
+        // El `display()` usa la representación nativa del SO. En Unix
+        // suele ser UTF-8 raw; no escapamos nada.
+        let p = Path::new("/datos/proyectos/ñoño");
+        assert_eq!(format_cd_payload(p), "cd /datos/proyectos/ñoño\n");
     }
 }

@@ -1,8 +1,9 @@
 # mytuis (Rust)
 
-Gestor de aplicaciones y rutas favoritas con TUI (basada en
-[`ratatui`](https://ratatui.rs)) y CLI. Reimplementación en Rust de
-[`mytuis.sh`](../README.md) con una nueva entidad: **rutas favoritas**.
+Gestor de aplicaciones, rutas favoritas y tools remotos con TUI
+(basada en [`ratatui`](https://ratatui.rs)) y CLI. Reimplementación
+en Rust de [`mytuis.sh`](../README.md) con dos entidades nuevas:
+**rutas favoritas** y **tools** (URLs que se abren en el navegador).
 
 ## Qué hay en este directorio
 
@@ -13,11 +14,12 @@ mytuis/
 │   ├── main.rs         ← entrypoint + dispatchers CLI
 │   ├── cli.rs          ← definición clap de subcomandos
 │   ├── config.rs       ← rutas de los YAML (~/.mytuis/)
-│   ├── model.rs        ← structs App y FavoritePath
-│   ├── resolve.rs      ← resolución de comandos y directorios
+│   ├── model.rs        ← structs App, FavoritePath y Tool
+│   ├── resolve.rs      ← resolución de comandos, directorios y URLs
 │   ├── storage.rs      ← load/save YAML atómico + migración bash
-│   ├── open.rs         ← detección de terminal + clipboard
-│   ├── error.rs        ← AppError (thiserror)
+│   ├── open.rs         ← detección de terminal + opener de URLs + clipboard
+│   ├── lang.rs         ← internacionalización (EN/ES)
+│   ├── error.rs        ← AppError (thiserror) + localized()
 │   └── tui/
 │       ├── mod.rs      ← bootstrap + state machine + event loop
 │       ├── theme.rs    ← paleta de colores (212/39/82/196/214/240/255)
@@ -47,14 +49,19 @@ install -m 755 target/release/mytuis /usr/local/bin/
 mytuis                  # abre la TUI (tab Apps por defecto)
 ```
 
-Una sola pantalla con dos tabs arriba: **Apps** y **Favoritos**. Tab /
-`←→` cambia de tab, `1`/`2` van directo a uno, las flechas o `j`/`k`
-navegan, typing filtra, Enter abre el submenú del item seleccionado,
-`a`/`e`/`d`/`r` agregan/editan/borran/ejecutan, `q` sale.
+Una sola pantalla con tres tabs arriba: **Apps**, **Favoritos** y
+**Tools**. Tab / `←→` cambia de tab, `1`/`2`/`3` van directo a uno,
+las flechas o `j`/`k` navegan, typing filtra, Enter abre el submenú
+del item seleccionado, `a`/`e`/`d`/`r` agregan/editan/borran/ejecutan,
+`q` sale.
 
 En el tab Favoritos la acción **"abrir terminal aquí"** lanza una
 terminal nueva con `cwd` = el directorio del favorito. El submenú de
 favoritos además tiene **"Copiar path al portapapeles"**.
+
+En el tab Tools la acción **"Run"** abre la URL con el opener del
+sistema (`xdg-open` / `gio open` / `open` en macOS). No hay meta entry:
+los tools se abren directo.
 
 ### CLI
 
@@ -66,12 +73,20 @@ mytuis apps add lsl "Listado largo" "ls -lad"
 mytuis apps remove nvim           # confirma en TTY
 mytuis apps remove nvim --yes     # sin confirmación
 
-# Favoritos (la nueva feature)
+# Favoritos (rutas a directorios)
 mytuis paths list
 mytuis paths add pepe /datos/pepe -d "Repo principal"
 mytuis paths add docs ~/Documents -d "Documentos"
 mytuis paths get pepe             # → /datos/pepe (para `cd` en shell)
+mytuis paths go pepe              # abre terminal en /datos/pepe y sale
 mytuis paths remove pepe
+
+# Tools (aplicaciones remotas / URLs)
+mytuis tools list
+mytuis tools add grafana "Monitoring" https://grafana.example.com
+mytuis tools add hub "Jupyter" https://jupyter.example.com
+mytuis tools run grafana          # abre la URL en el navegador
+mytuis tools remove grafana -y
 
 # Aliases de compatibilidad con la versión bash
 mytuis list                       # ≡ mytuis apps list
@@ -92,10 +107,75 @@ cdfav() {
 }
 
 # Abrir un favorito en nueva terminal
-favterm() {
-    mytuis >/dev/null 2>&1 &  # lanzamos la TUI para elegir
+gocd() {
+    mytuis paths go "$1"
 }
 ```
+
+Uso: `cdfav pepe` → te lleva a `/datos/pepe` (en tu terminal actual).
+`gocd pepe` → abre una terminal nueva en `/datos/pepe` y mytuis sale solo.
+
+### Meta entry `[↵] Open here` en la TUI
+
+En el tab **Favoritos**, al tope de la lista aparece una meta entry:
+
+```
+┌─ Favoritos (3) ──────────────────────────────────┐
+│ ▶ [↵] Open here                                  │  ← meta entry
+│   pepe       — Repo principal                     │
+│   docs       — Documentos                         │
+│   ...                                            │
+└──────────────────────────────────────────────────┘
+```
+
+Seleccioná la meta y apretá `Enter` (o presioná `g` desde cualquier
+favorito) para abrir una terminal en el favorito y salir de mytuis. La
+acción es la misma que `mytuis paths go <name>` pero desde la TUI.
+
+Si no hay favoritos, la meta entry no se muestra (no tendría sentido).
+
+## Localization (EN / ES)
+
+Todos los mensajes user-facing (CLI y TUI) están traducidos a
+**inglés** y **español**. El idioma se detecta automáticamente con la
+jerarquía estándar de Unix:
+
+1. `$MYTUIS_LANG` — override explícito del usuario.
+2. `$LC_ALL` — variable estándar POSIX de mayor prioridad.
+3. `$LC_MESSAGES` — específica para mensajes.
+4. `$LANG` — la más común.
+5. Default: **English**.
+
+Los valores se parsean con el formato POSIX: `en`, `en_US`, `en_US.UTF-8`,
+`es_AR`, `es_ES@euro`, etc. Solo importa el prefijo de dos letras.
+Cualquier idioma no soportado cae a English.
+
+```bash
+# Forzar español:
+LANG=es_AR.UTF-8 mytuis apps list
+LC_ALL=es_ES.UTF-8 mytuis apps list
+MYTUIS_LANG=es mytuis apps list
+
+# Forzar inglés:
+LANG=C mytuis apps list
+MYTUIS_LANG=en mytuis apps list
+
+# Default (si no hay variables): English
+mytuis apps list
+```
+
+**Lo que se traduce:** mensajes de error, mensajes de éxito, headers
+de tablas, prompts de confirmación, el texto completo de la TUI
+(header, tabs, submenús, formularios, mensajes flash, footer).
+
+**Lo que NO se traduce:**
+- `clap --help` (clap no soporta i18n nativo).
+- Nombres de subcomandos (`apps`, `paths`, `tools`, `list`, `add`,
+  `remove`, `get`, `run`).
+- Nombres de campos YAML (`name`, `description`, `path`, `url`).
+- Comentarios del código fuente (son para devs).
+
+Para agregar un idioma nuevo, ver [AGENTS.md](AGENTS.md#internacionalización).
 
 ## Storage
 
@@ -105,7 +185,8 @@ solo archivo:
 ```
 ~/.mytuis/
 ├── apps.yaml      ← apps (mismo formato que la versión bash)
-└── favs.yaml      ← favoritos
+├── favs.yaml      ← favoritos
+└── tools.yaml     ← tools (aplicaciones remotas / URLs)
 ```
 
 ### Migración automática desde `mytuis.sh`
@@ -144,13 +225,32 @@ favorites:
     last_used: '2026-06-26 12:30:00'   # opcional
 ```
 
+`tools.yaml`:
+
+```yaml
+tools:
+  - name: 'grafana'
+    description: 'Monitoring dashboard'   # opcional
+    url: 'https://grafana.example.com'
+    created: '2026-07-10 12:00:00'
+    last_used: '2026-07-10 12:30:00'    # opcional
+```
+
+Nota: para tools, `last_used` arranca igual que `created` cuando se
+guarda por primera vez (el tool "nació" en ese momento y ese fue su
+primer uso).
+
 Los campos opcionales se omiten del YAML cuando están vacíos (igual
 que la versión bash, para mantener el archivo compacto).
 
 ## Features
 
-- **TUI con dos tabs** (Apps y Favoritos), filtrable.
-- **Formularios modales** para add/edit de ambas entidades.
+- **TUI con tres tabs** (Apps, Favoritos y Tools), filtrable.
+- **Formularios modales** para add/edit de las tres entidades.
+- **Validación de URLs** al guardar un tool (solo http/https + host
+  no vacío).
+- **Opener de URLs** del sistema: prueba `xdg-open`, `gio open`,
+  `open` (macOS) en ese orden.
 - **Migración transparente** desde `mytuis.sh`.
 - **Atomic writes**: los YAML se escriben primero a `.tmp` y después
   se hace `rename`, así un corte de luz a mitad de guardado no rompe
@@ -162,8 +262,8 @@ que la versión bash, para mantener el archivo compacto).
 - **Detección de terminal** inteligente: respeta `$TERMINAL` y, si no,
   prueba `gnome-terminal`, `konsole`, `xfce4-terminal`, `alacritty`,
   `kitty`, `foot`, `wezterm`, `xterm` en ese orden.
-- **Tests unitarios** con `cargo test` (15 tests sobre model/storage/
-  resolve/open/config).
+- **Tests unitarios** con `cargo test` (61 tests sobre model/storage/
+  resolve/open/lang/config/TUI).
 
 ## Dependencias clave
 

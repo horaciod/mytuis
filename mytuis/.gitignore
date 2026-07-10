@@ -1,0 +1,151 @@
+# ============================================================================
+#  .gitignore — mytuis (Rust)
+# ============================================================================
+#  Estructura del proyecto:
+#    src/             ← código fuente (trackeado)
+#    Cargo.toml       ← dependencias (trackeado)
+#    Cargo.lock       ← lockfile — TRACKEADO (ver nota abajo)
+#    README.md        ← docs (trackeado)
+#    AGENTS.md        ← notas internas (trackeado)
+#    target/          ← output de compilación (IGNORADO)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+#  Rust / Cargo
+# ----------------------------------------------------------------------------
+
+# Donde van los artefactos de compilación (binarios, .rlib, .d, .pdb).
+# Es la regla #1 de cualquier proyecto Rust — siempre se ignora.
+target/
+
+# Perfiles de cargo adicionales (cargo --profile foo) que la gente a veces
+# genera para experimentos. Ignorarlos evita commitear binarios accidentalmente.
+/target/
+
+# Backups que deja `cargo fix --clippy` cuando aplica automáticamente.
+*.orig
+
+# Archivos temporales de Cargo al resolver dependencias.
+**/*.rs.bk
+
+# ----------------------------------------------------------------------------
+#  Cargo.lock — NO SE IGNORA
+# ----------------------------------------------------------------------------
+# Para **bibliotecas** publicadas en crates.io, Cargo.lock se ignora porque
+# los consumidores resuelven sus propias versiones.
+#
+# Para **binarios** (que es nuestro caso: `mytuis` es un binario), Cargo.lock
+# SÍ se commitea. Razón: queremos builds reproducibles — si una dep se
+# actualiza en crates.io y rompe algo, el lockfile queda fijo en la versión
+# que sabemos que funciona.
+#
+# Por eso NO hay una línea `Cargo.lock` acá. Si en algún momento `mytuis`
+# se transforma en una lib (cosa poco probable), habría que ignorar el
+# lockfile.
+
+# ----------------------------------------------------------------------------
+#  IDEs y editores
+# ----------------------------------------------------------------------------
+
+# IntelliJ / JetBrains (RustRover, CLion, IDEA)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Helix
+.helix/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Vim / Neovim
+*.swp
+*.swo
+*.un~
+Session.vim
+.netrwhist
+
+# Zed
+.zed/
+
+# ----------------------------------------------------------------------------
+#  Sistema operativo
+# ----------------------------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_view.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux / generales
+*~
+.fuse_hidden*
+.Trash-*
+
+# ----------------------------------------------------------------------------
+#  Logs y archivos runtime
+# ----------------------------------------------------------------------------
+
+# Logs varios
+*.log
+logs/
+
+# Archivos generados al correr (en caso de que agregues tests runtime)
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage / profiling (si en el futuro agregás `cargo tarpaulin`, etc.)
+coverage/
+*.lcov
+*.profraw
+*.gcda
+*.gcno
+
+# ----------------------------------------------------------------------------
+#  Archivos locales del desarrollador (no específicos del proyecto pero
+#  útiles para evitar commits accidentales de cosas personales)
+# ----------------------------------------------------------------------------
+
+# Variables de entorno locales (secretos / config personal)
+.env
+.env.local
+.env.*.local
+
+# Notas personales
+TODO.local.md
+NOTES.local.md
+
+# ----------------------------------------------------------------------------
+#  Smoke tests / fixtures temporales
+# ----------------------------------------------------------------------------
+# Si generás fixtures en /tmp o en el repo durante el desarrollo, podés
+# ignorar carpetas concretas acá. Por ahora no hay ninguna.
+# tests/fixtures/generated/

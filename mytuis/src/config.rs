@@ -45,6 +45,11 @@ pub fn favs_file() -> PathBuf {
     data_dir().join("favs.yaml")
 }
 
+/// Archivo de tools (aplicaciones remotas): `<data_dir>/tools.yaml`.
+pub fn tools_file() -> PathBuf {
+    data_dir().join("tools.yaml")
+}
+
 /// Archivo legacy de la versión bash: `~/.mytuis.yaml`. Lo usamos solo
 /// durante la migración: si existe y todavía no migramos, lo leemos,
 /// lo movemos a `apps.yaml` y renombramos este a `.bak`.
@@ -86,5 +91,12 @@ mod tests {
         let f = favs_file();
         assert_eq!(a.parent(), f.parent());
         assert_eq!(a.parent().unwrap(), data_dir());
+    }
+
+    #[test]
+    fn tools_file_vive_en_data_dir() {
+        let t = tools_file();
+        assert_eq!(t.parent().unwrap(), data_dir());
+        assert_eq!(t.file_name().and_then(|s| s.to_str()), Some("tools.yaml"));
     }
 }

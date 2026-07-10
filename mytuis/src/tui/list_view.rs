@@ -181,8 +181,16 @@ impl<I> ListView<I> {
         }
     }
 
-    /// Dibuja la lista en el área dada, con el título `title`.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, title: &str) {
+    /// Dibuja la lista en el área dada, con el título `title` arriba y el
+/// prompt de filtro `filter_prompt` abajo (el caller los construye con
+/// el `Lang` activo, así no acoplamos este widget al sistema de i18n).
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        filter_prompt: &str,
+    ) {
         // Convertimos cada item visible a un `ListItem` (texto con
         // estilo). El highlight lo maneja ratatui vía `ListState`.
         let items: Vec<ListItem> = self
@@ -194,18 +202,12 @@ impl<I> ListView<I> {
             })
             .collect();
 
-        let prompt = if self.filter.is_empty() {
-            "Tipea para filtrar".to_string()
-        } else {
-            format!("Filtro: {}", self.filter)
-        };
-
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(" {title} "))
-                    .title_bottom(format!(" {prompt} ")),
+                    .title_bottom(format!(" {filter_prompt} ")),
             )
             .highlight_style(super::theme::selected_style())
             .highlight_symbol("▶ ");
